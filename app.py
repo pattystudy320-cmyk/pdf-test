@@ -5,14 +5,14 @@ import re
 import math
 
 # --- 設定頁面 ---
-st.set_page_config(page_title="通用檢測報告擷取工具 (V9 最終修訂版)", layout="wide")
-st.title("🧪 通用型第三方檢測報告數據擷取工具 (V9 最終修訂版)")
+st.set_page_config(page_title="通用檢測報告擷取工具 (V10 最終修正版)", layout="wide")
+st.title("🧪 通用型第三方檢測報告數據擷取工具 (V10 最終修正版)")
 st.markdown("""
-**V9 版本功能特點：**
-1.  **🛡️ 智能分流**：重金屬(Pb)使用「黃金欄位鎖定」；有機物(PBBs)使用「子項目加總」。
-2.  **🧱 語義防火牆**：搜尋 Chlorine 時強制排除 PVC，避免誤判。
-3.  **📅 首頁日期鎖定**：排除測試週期，僅抓取簽發日期 (YYYY/MM/DD)。
-4.  **⭕ 空值保留**：未檢測項目維持空白。
+**V10 核心邏輯：**
+1.  **⚓ 黃金欄位鎖定 (Pb 專用)**：重金屬強制跟隨 Cd/Hg 所在欄位，防止抓到 Limit。
+2.  **🔍 獨立子項目掃描 (PBBs/PBDEs)**：脫離重金屬欄位限制，獨立搜尋子項目並加總。
+3.  **🛡️ 數據類型檢核 (Cl 專用)**：拒絕 Negative/Positive 結果，強制排除 PVC 干擾。
+4.  **⭕ 空值保留**：未抓取到的數值保持空白，不預設 N.D.。
 """)
 
 # --- 1. 定義目標欄位 ---
@@ -40,7 +40,7 @@ PBDES_KEYWORDS = [r"Monobromodiphenyl ether", r"Dibromodiphenyl ether", r"Tribro
                   r"Heptabromodiphenyl ether", r"Octabromodiphenyl ether", r"Nonabromodiphenyl ether", 
                   r"Decabromodiphenyl ether", r"一溴二苯醚", r"十溴二苯醚"]
 
-# --- 2. 輔助函式 ---
+# --- 2. 輔助函式區 ---
 
 def clean_text(text):
     if not text: return ""
@@ -51,12 +51,10 @@ def normalize_date(date_str):
     if not date_str: return ""
     clean_date = re.sub(r"Date:|Issue Date:|Report Date:|日期\s*\(?Date\)?[:：]?", "", date_str, flags=re.IGNORECASE).strip()
     try:
-        # 1. 數字格式
         match_num = re.search(r"(\d{4})[-/. ](\d{1,2})[-/. ](\d{1,2})", clean_date)
         if match_num:
             return f"{match_num.group(1)}/{int(match_num.group(2)):02d}/{int(match_num.group(3)):02d}"
         
-        # 2. 英文月份
         months = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6, 
                   "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
         
@@ -82,11 +80,9 @@ def find_date_in_first_page(text):
     """只在第一頁抓取日期"""
     lines = text.split('\n')
     for line in lines:
-        # 排除干擾關鍵字
         if "RECEIVED" in line.upper() or "PERIOD" in line.upper() or "STARTED" in line.upper(): continue
         
         if re.search(r"(Date|Issue Date|Report Date|日期)[:：\s\(]", line, re.IGNORECASE):
-            # 優先匹配完整日期格式
             m1 = re.search(r"(\d{4}[-/. ]\d{1,2}[-/. ]\d{1,2})", line)
             if m1: return normalize_date(m1.group(1))
             
@@ -97,8 +93,11 @@ def find_date_in_first_page(text):
             if m3: return normalize_date(m3.group(1))
     return ""
 
-def extract_value_logic(val_str):
-    """數值提取與過濾"""
+def extract_value_logic(val_str, strict_numeric=False):
+    """
+    V10 數值提取：
+    strict_numeric: 若為 True，則不接受 Negative/Positive，只接受 N.D. 或數字 (用於 Cl/Br)
+    """
     if not val_str: return None, ""
     
     val_upper = str(val_str).upper().replace(" ", "")
@@ -108,8 +107,14 @@ def extract_value_logic(val_str):
 
     # 2. 文字狀態
     if "N.D." in val_upper or "ND" in val_upper or "<" in val_upper: return 0, "N.D."
-    if "NEGATIVE" in val_upper or "阴性" in val_upper: return 0.0001, "NEGATIVE"
-    if "POSITIVE" in val_upper or "阳性" in val_upper: return 999999, "POSITIVE"
+    
+    if "NEGATIVE" in val_upper or "阴性" in val_upper: 
+        if strict_numeric: return None, "" # 鹵素測試中 Negative 是無效值 (可能是 PVC)
+        return 0.0001, "NEGATIVE"
+        
+    if "POSITIVE" in val_upper or "阳性" in val_upper: 
+        if strict_numeric: return None, ""
+        return 999999, "POSITIVE"
     
     # 3. 數字提取
     val_clean = re.sub(r"(mg/kg|ppm|%|µg/cm²|ug/cm2)", "", val_str, flags=re.IGNORECASE)
@@ -166,7 +171,6 @@ def get_column_score(header_cells, table_data=None):
     for i, cell in enumerate(header_cells):
         if not cell: continue
         txt = clean_text(str(cell)).upper()
-        
         score = 0
         if any(ex in txt for ex in exclude_kw): score -= 100
         if any(res in txt for res in result_kw): score += 50
@@ -175,11 +179,9 @@ def get_column_score(header_cells, table_data=None):
         if i + 1 < num_cols:
             right_txt = clean_text(str(header_cells[i+1])).upper()
             if any(k in right_txt for k in mdl_kw): score += 30
-            
         if i - 1 >= 0:
             left_txt = clean_text(str(header_cells[i-1])).upper()
             if "ITEM" in left_txt or "项目" in left_txt: score += 20
-            
         scores[i] = score
 
     if table_data and len(table_data) > 3:
@@ -204,7 +206,7 @@ def get_column_score(header_cells, table_data=None):
             if is_cas > 0: scores[i] -= 200
             if is_method > 0: scores[i] -= 100
             if is_numeric_or_nd > 0: scores[i] += 20
-            if is_float > 0: scores[i] += 100 # 浮點數強力加分
+            if is_float > 0: scores[i] += 100 
 
     if not scores: return -1
     best_col = max(scores, key=scores.get)
@@ -221,8 +223,9 @@ def find_golden_column(table, result_col_idx):
         val_text = clean_text(row[result_col_idx])
         val_num, val_disp = extract_value_logic(val_text)
         
-        if ("CADMIUM" in row_text or "镉" in row_text) and (val_disp == "N.D." or val_num > 0): score += 1
-        if ("MERCURY" in row_text or "汞" in row_text) and (val_disp == "N.D." or val_num > 0): score += 1
+        if val_num is not None:
+            if ("CADMIUM" in row_text or "镉" in row_text) and (val_disp == "N.D." or val_num > 0): score += 1
+            if ("MERCURY" in row_text or "汞" in row_text) and (val_disp == "N.D." or val_num > 0): score += 1
             
     return score >= 1
 
@@ -282,7 +285,7 @@ def process_file(uploaded_file):
                             if len(row) > 1: item_name += " " + clean_text(row[1])
                             
                             val_text = clean_text(row[result_col_idx])
-                            # is_golden 只對重金屬有效，其他仍走一般更新流程
+                            # is_golden 只對重金屬有效，有機物完全獨立
                             update_results(results, item_name, val_text, is_golden_col=is_golden)
 
             # C. 文字流模式 (Fallback)
@@ -304,22 +307,22 @@ def process_file(uploaded_file):
                 for y, row_words in rows.items():
                     line_text = " ".join([w['text'] for w in row_words])
                     
-                    # 處理一般項目 (排除已由黃金欄位鎖定的項目)
+                    # 處理一般項目
                     for field, config in TARGET_FIELDS.items():
                         for kw in config["keywords"]:
                             if re.search(kw, line_text, re.IGNORECASE):
                                 if field == "Chlorine" and ("POLYVINYL" in line_text.upper() or "PVC" in line_text.upper()): continue
-                                if results[field]["val"] is not None: continue # 已有值跳過
+                                if results[field]["val"] is not None: continue 
 
                                 for w in row_words:
                                     w_center = (w['x0'] + w['x1']) / 2
                                     if abs(w_center - target_x_center) < 150: 
-                                        val, disp = extract_value_logic(w['text'])
+                                        val, disp = extract_value_logic(w['text'], strict_numeric=(field in ["Chlorine", "Bromine"]))
                                         if val is not None:
                                             update_results(results, field, disp)
                                             break
 
-                    # 處理 PBBs/PBDEs (子項目加總)
+                    # PBBs/PBDEs 加總
                     for pbb_kw in PBBS_KEYWORDS + PBDES_KEYWORDS:
                         if re.search(pbb_kw, line_text, re.IGNORECASE):
                              for w in row_words:
@@ -334,6 +337,12 @@ def process_file(uploaded_file):
 
     finalize_results(results)
     
+    # 填充
+    for k, v in results.items():
+        if isinstance(v, dict) and "val" in v and v["val"] is None:
+            v["display"] = "" # 保持空白
+            v["val"] = 0
+
     final_output = {
         "File Name": filename,
         "Pb": results["Lead"]["display"],
@@ -362,12 +371,16 @@ def process_file(uploaded_file):
 def update_results(results, item_name, val_text, is_golden_col=False):
     item_upper = str(item_name).upper()
     
-    # 語義防火牆
+    # 語義防火牆: 防止 Chlorine 抓到 Polyvinyl Chloride
     if "CHLORINE" in item_upper and ("POLYVINYL" in item_upper or "PVC" in item_upper): return
-
-    val_num, val_disp = extract_value_logic(val_text)
+    
+    # 針對鹵素開啟嚴格數字模式 (拒絕 Negative)
+    is_halogen = any(x in item_upper for x in ["CHLORINE", "BROMINE", "FLUORINE", "IODINE", "氯", "溴", "氟", "碘"])
+    
+    val_num, val_disp = extract_value_logic(val_text, strict_numeric=is_halogen)
     if val_num is None: return
 
+    # 一般項目
     for field_key, config in TARGET_FIELDS.items():
         for kw in config["keywords"]:
             if re.search(kw, item_upper, re.IGNORECASE):
@@ -377,7 +390,6 @@ def update_results(results, item_name, val_text, is_golden_col=False):
                     results[field_key]["display"] = val_disp
                     return
 
-                # 一般邏輯：比大小
                 current_val = results[field_key]["val"]
                 if current_val is None or val_num > current_val:
                     results[field_key]["val"] = val_num
@@ -388,7 +400,7 @@ def update_results(results, item_name, val_text, is_golden_col=False):
                     results[field_key]["val"] = 0
                 return
 
-    # PBBs/PBDEs 子項目加總 (不受黃金欄位影響)
+    # PBBs/PBDEs 子項目加總 (不受黃金欄位影響，永遠獨立加總)
     for pbb_kw in PBBS_KEYWORDS:
         if re.search(pbb_kw, item_upper, re.IGNORECASE):
             if val_num > 0:
@@ -425,7 +437,7 @@ if uploaded_files:
     all_data = []
     scanned_files = []
 
-    with st.spinner('正在進行 V9 引擎分析 (分流機制 + 日期修正)...'):
+    with st.spinner('正在進行 V10 引擎分析 (分流 + 型別過濾 + 空值保留)...'):
         for pdf_file in uploaded_files:
             data, scanned_name = process_file(pdf_file)
             if scanned_name:
@@ -441,14 +453,14 @@ if uploaded_files:
         else:
             display_df = df
         
-        st.success(f"✅ 成功擷取 {len(all_data)} 份報告！(V9 核心)")
+        st.success(f"✅ 成功擷取 {len(all_data)} 份報告！(V10 核心)")
         st.dataframe(display_df, use_container_width=True)
         
         csv = display_df.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
             label="📥 下載 Excel/CSV 報表",
             data=csv,
-            file_name="rohs_report_v9_final.csv",
+            file_name="rohs_report_v10_final.csv",
             mime="text/csv",
         )
 
