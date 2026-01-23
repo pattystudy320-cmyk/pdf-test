@@ -5,14 +5,14 @@ import re
 import math
 
 # --- 設定頁面 ---
-st.set_page_config(page_title="通用檢測報告擷取工具 (V12 最終融合版)", layout="wide")
-st.title("🧪 通用型第三方檢測報告數據擷取工具 (V12 最終融合版)")
+st.set_page_config(page_title="通用檢測報告擷取工具 (V13 穩定修正版)", layout="wide")
+st.title("🧪 通用型第三方檢測報告數據擷取工具 (V13 穩定修正版)")
 st.markdown("""
-**V12 核心策略：分而治之 (Divide and Conquer)**
-1.  **⚓ 重金屬 (Pb)**：使用「黃金欄位鎖定」，跟隨 Cd/Hg，確保 Pb(3.53) 準確。
-2.  **∑ 有機物 (PBBs)**：使用「全域子項目加總」，掃描表格內所有子項目累加，解決空值問題。
-3.  **👁️ 單項掃描 (PFOS/Cl)**：使用「智慧行掃描」，自動避開 Limit/MDL，解決 PFOS 消失與 Cl 誤判。
-4.  **📅 日期鎖定**：僅鎖定報告首頁簽發日。
+**V13 核心策略：回歸 V10 架構 + 精準修補**
+1.  **🎯 絕對欄位定位**：廢除智慧掃描，嚴格讀取 Result 欄位，徹底解決誤抓 CAS No. (如 85, 1763) 的問題。
+2.  **⚓ 重金屬 (Pb)**：維持「黃金欄位鎖定」，跟隨 Cd/Hg，確保數值準確。
+3.  **∑ 有機物 (PBBs)**：維持「子項目加總」，掃描全表累加。
+4.  **🔧 PFOS/Cl 修正**：PFOS 改為單項抓取；Cl 增加型別檢查 (拒絕 Negative)，解決誤判。
 """)
 
 # --- 1. 定義目標欄位 ---
@@ -89,31 +89,36 @@ def find_date_in_first_page(text):
     return ""
 
 def extract_value_logic(val_str, strict_numeric=False):
+    """
+    V13 數值提取邏輯
+    strict_numeric: 若為 True，則拒絕 Negative/Positive，只接受數字或 N.D. (用於 Cl/Br/PFOS)
+    """
     if not val_str: return None, ""
     
     val_upper = str(val_str).upper().replace(" ", "")
     
+    # 1. CAS 防火牆 (絕對不抓 CAS No.)
     if re.search(r"\b\d{2,7}-\d{2}-\d\b", val_str): return None, ""
 
+    # 2. 文字狀態
     if "N.D." in val_upper or "ND" in val_upper or "<" in val_upper: return 0, "N.D."
     
     if "NEGATIVE" in val_upper or "阴性" in val_upper: 
-        if strict_numeric: return None, ""
+        if strict_numeric: return None, "" # 鹵素/PFOS 測試中 Negative 是無效值 (可能是 PVC)
         return 0.0001, "NEGATIVE"
         
     if "POSITIVE" in val_upper or "阳性" in val_upper: 
         if strict_numeric: return None, ""
         return 999999, "POSITIVE"
     
+    # 3. 數字提取
     val_clean = re.sub(r"(mg/kg|ppm|%|µg/cm²|ug/cm2)", "", val_str, flags=re.IGNORECASE)
     match = re.search(r"(\d+(\.\d+)?)", val_clean)
     
     if match:
         num = float(match.group(1))
+        # 年份過濾
         if 2010 <= num <= 2030: return None, ""
-        # V11/V12: 智慧掃描輔助，排除 Limit/MDL
-        if num in [100, 1000, 2, 5, 8, 10, 25, 50] and "ND" not in val_upper:
-            pass 
         return num, match.group(1)
     
     return None, ""
@@ -146,8 +151,13 @@ def check_pfas_in_section(full_text):
     return ""
 
 def get_column_score(header_cells, table_data=None):
+    """
+    V13 欄位評分：找出最像 Result 的欄位索引
+    """
     scores = {} 
     num_cols = len(header_cells)
+    
+    # 關鍵字定義
     exclude_kw = ["ITEM", "METHOD", "UNIT", "MDL", "LOQ", "LIMIT", "REQUIREMENT", "项目", "方法", "单位", "限值", "RL", "CAS", "NO.", "序"]
     result_kw = ["RESULT", "结果", "SAMPLE", "ID", "001", "002", "A1", "DATA", "含量"]
     mdl_kw = ["MDL", "LOQ", "RL", "LIMIT", "限值"]
@@ -155,44 +165,58 @@ def get_column_score(header_cells, table_data=None):
     for i, cell in enumerate(header_cells):
         if not cell: continue
         txt = clean_text(str(cell)).upper()
+        
         score = 0
+        # 1. 標題特徵
         if any(ex in txt for ex in exclude_kw): score -= 100
         if any(res in txt for res in result_kw): score += 50
-        if "CAS" in txt: score -= 200 
+        if "CAS" in txt: score -= 200 # CAS 絕對排除
+        
+        # 2. 鄰居關係
         if i + 1 < num_cols:
             right_txt = clean_text(str(header_cells[i+1])).upper()
             if any(k in right_txt for k in mdl_kw): score += 30
         if i - 1 >= 0:
             left_txt = clean_text(str(header_cells[i-1])).upper()
             if "ITEM" in left_txt or "项目" in left_txt: score += 20
+            
         scores[i] = score
 
+    # 3. 內容採樣 (Data Fingerprinting)
     if table_data and len(table_data) > 3:
         for i in range(num_cols):
             if i not in scores: continue
             sample_vals = []
-            for row in table_data[1:5]:
+            for row in table_data[1:6]: # 採樣前幾行
                 if i < len(row): sample_vals.append(clean_text(str(row[i])).upper())
+            
             is_numeric_or_nd = 0
             is_cas = 0
             is_method = 0
             is_float = 0
+            
             for val in sample_vals:
-                if "N.D." in val or "NEGATIVE" in val or re.search(r"^\d+(\.\d+)?$", val): is_numeric_or_nd += 1
-                if re.search(r"^\d+\.\d+$", val): is_float += 1
-                if re.search(r"\d{2,7}-\d{2}-\d", val): is_cas += 1
-                if "IEC" in val or "EPA" in val: is_method += 1
-            if is_cas > 0: scores[i] -= 200
-            if is_method > 0: scores[i] -= 100
+                if "N.D." in val or "NEGATIVE" in val or re.search(r"^\d+(\.\d+)?$", val):
+                    is_numeric_or_nd += 1
+                if re.search(r"^\d+\.\d+$", val):
+                    is_float += 1 # 浮點數是強特徵 (區分 Limit 1000)
+                if re.search(r"\d{2,7}-\d{2}-\d", val): 
+                    is_cas += 1
+                if "IEC" in val or "EPA" in val: 
+                    is_method += 1
+            
+            if is_cas > 0: scores[i] -= 200 # 這一欄是 CAS，扣分
+            if is_method > 0: scores[i] -= 100 # 這一欄是 Method，扣分
             if is_numeric_or_nd > 0: scores[i] += 20
-            if is_float > 0: scores[i] += 100 
+            if is_float > 0: scores[i] += 100 # 這一欄有 3.53，加分
 
     if not scores: return -1
     best_col = max(scores, key=scores.get)
-    if scores[best_col] < -50: return -1
+    if scores[best_col] < -50: return -1 # 門檻
     return best_col
 
 def find_golden_column(table, result_col_idx):
+    """ V13 黃金欄位：利用 Cd/Hg 鎖定 """
     if result_col_idx == -1: return False
     score = 0
     for row in table:
@@ -200,30 +224,12 @@ def find_golden_column(table, result_col_idx):
         row_text = " ".join([str(c).upper() for c in row if c])
         val_text = clean_text(row[result_col_idx])
         val_num, val_disp = extract_value_logic(val_text)
+        
         if val_num is not None:
             if ("CADMIUM" in row_text or "镉" in row_text) and (val_disp == "N.D." or val_num > 0): score += 1
             if ("MERCURY" in row_text or "汞" in row_text) and (val_disp == "N.D." or val_num > 0): score += 1
+            
     return score >= 1
-
-def perform_smart_scan(row, strict_numeric=False):
-    """
-    V12 智慧行掃描：掃描整行，排除 Limit/MDL，找出最佳結果值
-    """
-    potential_vals = []
-    for cell in row:
-        txt = clean_text(str(cell))
-        val_num, val_disp = extract_value_logic(txt, strict_numeric=strict_numeric)
-        if val_num is not None:
-            # 排除常見 Limit/MDL 數值 (除非它是 N.D.)
-            if val_num in [2, 5, 8, 10, 25, 50, 100, 1000] and val_disp != "N.D.":
-                continue
-            potential_vals.append((val_num, val_disp))
-    
-    if potential_vals:
-        # 取最後一個 (通常結果排在 Limit 左邊，或中間)
-        # 如果有浮點數 (如 3.53)，優先級最高 (這裡簡化，取最後一個有效值通常正確)
-        return potential_vals[-1]
-    return None
 
 def process_file(uploaded_file):
     filename = uploaded_file.name
@@ -248,7 +254,7 @@ def process_file(uploaded_file):
         if is_scanned: return None, filename
         results["PFAS"] = check_pfas_in_section(full_text_content)
 
-        # B. 表格數據提取 (V12 分流策略)
+        # B. 表格數據提取 (V13 回歸版)
         for page in pdf.pages:
             tables = page.extract_tables()
             if tables:
@@ -258,7 +264,7 @@ def process_file(uploaded_file):
                     header_row_idx = -1
                     result_col_idx = -1
                     
-                    # 1. 嘗試尋找表頭 (為了重金屬黃金欄位)
+                    # 1. 定位表頭與結果欄
                     for r_idx, row in enumerate(table[:6]):
                         row_str = " ".join([str(c).upper() for c in row if c])
                         if ("ITEM" in row_str or "项目" in row_str) and ("UNIT" in row_str or "MDL" in row_str or "RESULT" in row_str or "结果" in row_str):
@@ -271,7 +277,7 @@ def process_file(uploaded_file):
                     start_row = header_row_idx + 1 if header_row_idx != -1 else 0
                     is_golden_table = find_golden_column(table, result_col_idx) if result_col_idx != -1 else False
 
-                    # 2. 遍歷所有行 (執行分流邏輯)
+                    # 2. 遍歷表格行
                     for r_idx in range(start_row, len(table)):
                         row = table[r_idx]
                         if not row: continue
@@ -280,56 +286,46 @@ def process_file(uploaded_file):
                         if len(row) > 1: item_name += " " + clean_text(row[1])
                         item_upper = item_name.upper()
 
-                        # --- 策略 A: 有機物 (PBBs/PBDEs) 全域子項目加總 ---
-                        # 不管這是哪個表，只要看到子項目就加總 (回歸 V10 暴力法)
-                        for pbb_kw in PBBS_KEYWORDS:
+                        # --- 策略 A: PBBs/PBDEs 全域加總 (不依賴 Result 欄位，掃描整行) ---
+                        # 這部分維持 V10 的暴力加總法，因為它最穩
+                        for pbb_kw in PBBS_KEYWORDS + PBDES_KEYWORDS:
                             if re.search(pbb_kw, item_upper, re.IGNORECASE):
-                                res = perform_smart_scan(row) # 用智慧掃描抓取該行數值
-                                if res:
-                                    val_num, _ = res
-                                    if val_num > 0:
-                                        results["PBBs"]["sum_val"] += val_num
-                                        results["PBBs"]["val"] = 1
-                        
-                        for pbde_kw in PBDES_KEYWORDS:
-                            if re.search(pbde_kw, item_upper, re.IGNORECASE):
-                                res = perform_smart_scan(row)
-                                if res:
-                                    val_num, _ = res
-                                    if val_num > 0:
-                                        results["PBDEs"]["sum_val"] += val_num
-                                        results["PBDEs"]["val"] = 1
+                                # 在這一行裡找數值 (避開 Limit/MDL)
+                                potential_vals = []
+                                for cell in row:
+                                    v_num, v_disp = extract_value_logic(clean_text(str(cell)))
+                                    if v_num is not None:
+                                        if v_num in [5, 10, 1000] and v_disp != "N.D.": continue # 簡單過濾
+                                        potential_vals.append(v_num)
+                                
+                                if potential_vals:
+                                    val = potential_vals[-1] # 取最後一個有效值
+                                    if val > 0:
+                                        cat = "PBBs" if any(k in pbb_kw for k in PBBS_KEYWORDS) else "PBDEs"
+                                        results[cat]["sum_val"] += val
+                                        results[cat]["val"] = 1
 
-                        # --- 策略 B: 重金屬 (Pb/Cd/Hg/Cr6) 黃金欄位鎖定 ---
-                        # 只有在確認是 Golden Table 時才使用鎖定，否則使用智慧掃描
-                        is_heavy_metal = any(k in item_upper for k in ["LEAD", "CADMIUM", "MERCURY", "HEXAVALENT", "PB", "CD", "HG", "CR(VI)", "铅", "镉", "汞", "六价铬"])
-                        
-                        if is_heavy_metal and is_golden_table and result_col_idx != -1 and len(row) > result_col_idx:
-                             val_text = clean_text(row[result_col_idx])
-                             update_results(results, item_name, val_text, is_golden_col=True)
-                             continue # 重金屬處理完畢
+                        # --- 策略 B: 單項數值 (Pb, Cd, Cl, PFOS...) ---
+                        # 嚴格使用 result_col_idx，不亂掃描
+                        if result_col_idx != -1 and len(row) > result_col_idx:
+                            val_text = clean_text(row[result_col_idx])
+                            
+                            # 針對重金屬，如果是 Golden Table，強制使用
+                            # 針對其他項目，也是使用此欄位，但要過濾 PVC
+                            
+                            # 語義防火牆 (Cl)
+                            if "CHLORINE" in item_upper and ("POLYVINYL" in item_upper or "PVC" in item_upper):
+                                continue # 跳過 PVC 行
 
-                        # --- 策略 C: 其他單項 (PFOS, Cl, F, etc.) 智慧行掃描 ---
-                        # 包含非 Golden Table 的重金屬，以及 PFOS, Cl
-                        # 掃描目標關鍵字
-                        for field, config in TARGET_FIELDS.items():
-                            for kw in config["keywords"]:
-                                if re.search(kw, item_upper, re.IGNORECASE):
-                                    # 語義防火牆 (Cl)
-                                    if field == "Chlorine" and ("POLYVINYL" in item_upper or "PVC" in item_upper): continue
-                                    
-                                    # 重金屬如果在 Golden Table 已經被上面處理過了，這裡處理剩下的
-                                    if results[field]["val"] is not None and field in ["Lead", "Cadmium", "Mercury", "Hexavalent Chromium"]: continue
+                            # 嚴格型別檢查 (Cl, Br, PFOS)
+                            is_strict = any(x in item_upper for x in ["CHLORINE", "BROMINE", "PFOS", "FLUORINE", "IODINE"])
+                            
+                            val_num, val_disp = extract_value_logic(val_text, strict_numeric=is_strict)
+                            
+                            if val_num is not None:
+                                update_results(results, item_name, val_num, val_disp, is_golden_col=is_golden_table)
 
-                                    is_strict = (field in ["Chlorine", "Bromine"]) # Cl/Br 不接受 Negative
-                                    res = perform_smart_scan(row, strict_numeric=is_strict)
-                                    
-                                    if res:
-                                        val_num, val_disp = res
-                                        # 寫入結果
-                                        update_results_direct(results, field, val_num, val_disp)
-
-            # C. 文字流模式 (Fallback, 僅針對尚未抓到的項目)
+            # C. 文字流模式 (Fallback)
             words = page.extract_words(keep_blank_chars=True)
             target_x_center = -1
             for w in words:
@@ -347,7 +343,8 @@ def process_file(uploaded_file):
                 
                 for y, row_words in rows.items():
                     line_text = " ".join([w['text'] for w in row_words])
-                    # 簡單補漏 PBBs (文字流模式)
+                    
+                    # 補漏 PBBs/PBDEs (文字流)
                     for pbb_kw in PBBS_KEYWORDS + PBDES_KEYWORDS:
                         if re.search(pbb_kw, line_text, re.IGNORECASE):
                              for w in row_words:
@@ -393,24 +390,19 @@ def process_file(uploaded_file):
     
     return final_output, None
 
-def update_results(results, item_name, val_text, is_golden_col=False):
-    """ V12 通用更新邏輯 (主要用於表單模式) """
+def update_results(results, item_name, val_num, val_disp, is_golden_col=False):
     item_upper = str(item_name).upper()
-    if "CHLORINE" in item_upper and ("POLYVINYL" in item_upper or "PVC" in item_upper): return
     
-    is_halogen = any(x in item_upper for x in ["CHLORINE", "BROMINE", "FLUORINE", "IODINE"])
-    val_num, val_disp = extract_value_logic(val_text, strict_numeric=is_halogen)
-    if val_num is None: return
-
     for field_key, config in TARGET_FIELDS.items():
         for kw in config["keywords"]:
             if re.search(kw, item_upper, re.IGNORECASE):
+                # 黃金欄位強制更新 (只針對重金屬)
                 if is_golden_col and field_key in ["Lead", "Cadmium", "Mercury", "Hexavalent Chromium"]:
                     results[field_key]["val"] = val_num
                     results[field_key]["display"] = val_disp
                     return
-                
-                # 比大小更新
+
+                # 一般更新 (比大小)
                 current_val = results[field_key]["val"]
                 if current_val is None or val_num > current_val:
                     results[field_key]["val"] = val_num
@@ -420,17 +412,6 @@ def update_results(results, item_name, val_text, is_golden_col=False):
                     elif not results[field_key]["display"]: results[field_key]["display"] = "N.D."
                     results[field_key]["val"] = 0
                 return
-
-def update_results_direct(results, field_key, val_num, val_disp):
-    """ 直接更新指定欄位 (用於智慧掃描) """
-    current_val = results[field_key]["val"]
-    if current_val is None or val_num > current_val:
-        results[field_key]["val"] = val_num
-        results[field_key]["display"] = val_disp
-    elif val_num == 0 and (current_val == 0 or current_val is None):
-        if val_disp == "NEGATIVE": results[field_key]["display"] = "NEGATIVE"
-        elif not results[field_key]["display"]: results[field_key]["display"] = "N.D."
-        results[field_key]["val"] = 0
 
 def finalize_results(results):
     if results["PBBs"]["sum_val"] > 0:
@@ -454,7 +435,7 @@ if uploaded_files:
     all_data = []
     scanned_files = []
 
-    with st.spinner('正在進行 V12 引擎分析 (分流 + 智慧行掃描 + 全域加總)...'):
+    with st.spinner('正在進行 V13 引擎分析 (回歸 V10 架構 + 精準修復)...'):
         for pdf_file in uploaded_files:
             data, scanned_name = process_file(pdf_file)
             if scanned_name:
@@ -470,14 +451,14 @@ if uploaded_files:
         else:
             display_df = df
         
-        st.success(f"✅ 成功擷取 {len(all_data)} 份報告！(V12 核心)")
+        st.success(f"✅ 成功擷取 {len(all_data)} 份報告！(V13 核心)")
         st.dataframe(display_df, use_container_width=True)
         
         csv = display_df.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
             label="📥 下載 Excel/CSV 報表",
             data=csv,
-            file_name="rohs_report_v12_final.csv",
+            file_name="rohs_report_v13_stable.csv",
             mime="text/csv",
         )
 
