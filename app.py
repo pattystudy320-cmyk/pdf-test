@@ -5,16 +5,17 @@ import re
 from datetime import datetime
 
 # --- 設定頁面 ---
-st.set_page_config(page_title="通用檢測報告擷取工具 (V17 跨行修正版)", layout="wide")
-st.title("🧪 通用型第三方檢測報告數據擷取工具 (V17 跨行修正版)")
+st.set_page_config(page_title="通用檢測報告擷取工具 (V17 視覺座標版)", layout="wide")
+st.title("🧪 通用型第三方檢測報告數據擷取工具 (V17 視覺座標版)")
 st.markdown("""
-**V17 版本修正重點：**
-1.  **📄 PBBs/PBDEs 跨行掃描**：解決 CTI 數值掉到下一行的問題，並適用於 Intertek 韓國版等特殊排版。
-2.  **🎯 SGS 絕對位置**：針對 SGS 報告，若無法定位欄位，優先鎖定「最右欄」。
-3.  **🛡️ 樣品 ID 鎖定**：自動抓取 A1, A2, 001 等編號作為欄位定位依據。
+**V17 版本核心特徵：視覺座標引擎 + 多國語言字典**
+1.  **👁️ PBBs/PBDEs 視覺掃描**：利用文字座標 (Y-Axis) 鎖定同一行數值，無視排版錯位與隱形表格。
+2.  **🌍 多國語言字典**：新增 SGS 專用術語、英文縮寫 (MonoBB)、韓文關鍵字 (모노브로모)。
+3.  **📅 韓國日期支援**：支援 `YYYY. MM. DD.` 格式與韓文發行日標籤。
+4.  **🛡️ SGS 絕對防禦**：若表格定位失敗，強制鎖定最右欄。
 """)
 
-# --- 1. 關鍵字定義 ---
+# --- 1. 擴充關鍵字定義 (包含字根、縮寫、韓文) ---
 TARGET_FIELDS = {
     "Lead": {"name": "Pb", "keywords": [r"^Lead\b", r"^Pb\b", r"铅", r"Lead \(Pb\)", r"Pb"]},
     "Cadmium": {"name": "Cd", "keywords": [r"^Cadmium\b", r"^Cd\b", r"镉", r"Cadmium \(Cd\)", r"Cd"]},
@@ -31,19 +32,21 @@ TARGET_FIELDS = {
     "PFOS": {"name": "PFOS", "keywords": [r"Perfluorooctane Sulfonates", r"PFOS", r"全氟辛烷磺酸"]},
 }
 
-# 有機物關鍵字 (純文字掃描用)
-PBBS_KEYWORDS = [r"Monobromobiphenyl", r"Dibromobiphenyl", r"Tribromobiphenyl", r"Tetrabromobiphenyl", 
-                 r"Pentabromobiphenyl", r"Hexabromobiphenyl", r"Heptabromobiphenyl", r"Octabromobiphenyl", 
-                 r"Nonabromobiphenyl", r"Decabromobiphenyl", 
-                 r"一溴联苯", r"二溴联苯", r"三溴联苯", r"四溴联苯", r"五溴联苯", 
-                 r"六溴联苯", r"七溴联苯", r"八溴联苯", r"九溴联苯", r"十溴联苯"]
+# 有機物關鍵字 (視覺掃描用 - 字根匹配)
+# 包含：英文全稱字根、縮寫、中文、韓文
+PBBS_ROOTS = [
+    "Monobromo", "Dibromo", "Tribromo", "Tetrabromo", "Pentabromo", "Hexabromo", "Heptabromo", "Octabromo", "Nonabromo", "Decabromo",
+    "MonoBB", "DiBB", "TriBB", "TetraBB", "PentaBB", "HexaBB", "HeptaBB", "OctaBB", "NonaBB", "DecaBB",
+    "一溴联苯", "二溴联苯", "三溴联苯", "四溴联苯", "五溴联苯", "六溴联苯", "七溴联苯", "八溴联苯", "九溴联苯", "十溴联苯",
+    "모노브로모", "다이브로모", "트라이브로모", "테트라브로모", "펜타브로모", "헥사브로모", "헵타브로모", "옥타브로모", "노나브로모", "데카브로모"
+]
 
-PBDES_KEYWORDS = [r"Monobromodiphenyl ether", r"Dibromodiphenyl ether", r"Tribromodiphenyl ether", 
-                  r"Tetrabromodiphenyl ether", r"Pentabromodiphenyl ether", r"Hexabromodiphenyl ether", 
-                  r"Heptabromodiphenyl ether", r"Octabromodiphenyl ether", r"Nonabromodiphenyl ether", 
-                  r"Decabromodiphenyl ether", 
-                  r"一溴二苯醚", r"二溴二苯醚", r"三溴二苯醚", r"四溴二苯醚", r"五溴二苯醚", 
-                  r"六溴二苯醚", r"七溴二苯醚", r"八溴二苯醚", r"九溴二苯醚", r"十溴二苯醚"]
+PBDES_ROOTS = [
+    "Monobromodiphenyl", "Dibromodiphenyl", "Tribromodiphenyl", "Tetrabromodiphenyl", "Pentabromodiphenyl", "Hexabromodiphenyl", 
+    "Heptabromodiphenyl", "Octabromodiphenyl", "Nonabromodiphenyl", "Decabromodiphenyl",
+    "MonoBDE", "DiBDE", "TriBDE", "TetraBDE", "PentaBDE", "HexaBDE", "HeptaBDE", "OctaBDE", "NonaBDE", "DecaBDE",
+    "一溴二苯醚", "二溴二苯醚", "三溴二苯醚", "四溴二苯醚", "五溴二苯醚", "六溴二苯醚", "七溴二苯醚", "八溴二苯醚", "九溴二苯醚", "十溴二苯醚"
+]
 
 # --- 2. 輔助函式 ---
 
@@ -52,36 +55,46 @@ def clean_text(text):
     return re.sub(r'\s+', ' ', str(text)).strip()
 
 def parse_date_obj(date_str):
-    clean = re.sub(r"Date:|Issue Date:|Report Date:|日期\s*\(?Date\)?[:：]?", "", date_str, flags=re.IGNORECASE).strip()
-    clean = clean.replace("/", "-").replace(".", "-").replace(" ", "-")
+    """強化的日期解析，支援韓文格式與空格點"""
+    clean = re.sub(r"Date:|Issue Date:|Report Date:|日期|발행일자|발행\s*\(?Date\)?[:：]?", "", date_str, flags=re.IGNORECASE).strip()
+    clean = clean.replace("/", "-").replace(" ", "-") # 先把常見分隔符統一
     
+    # 針對韓文/特殊格式 2024. 10. 17. 進行預處理
+    # 將 "2024. 10. 17" 轉為 "2024-10-17"
+    if "." in clean:
+        clean = re.sub(r"\s+", "", clean) # 移除所有空格
+        clean = clean.rstrip(".") # 移除結尾的點
+        clean = clean.replace(".", "-")
+
     formats = ["%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y", "%b-%d-%Y", "%B-%d-%Y", "%d-%b-%y", "%d-%B-%y"]
     for fmt in formats:
         try: return datetime.strptime(clean, fmt)
         except: continue
             
+    # Regex 補強
     try:
-        m = re.search(r"(\d{4})[-/. ](\d{1,2})[-/. ](\d{1,2})", date_str)
+        # 2025-06-16
+        m = re.search(r"(\d{4})[-/. ]*(\d{1,2})[-/. ]*(\d{1,2})", date_str)
         if m: return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         
+        # 16-Jun-2025
         m2 = re.search(r"(\d{1,2})[-/\s]([A-Za-z]{3})[-/\s,.]+(\d{4})", date_str, re.IGNORECASE)
         if m2: return datetime.strptime(f"{m2.group(1)}-{m2.group(2)}-{m2.group(3)}", "%d-%b-%Y")
-        
-        m3 = re.search(r"([A-Za-z]{3})\.?\s+(\d{1,2})[,\s]+(\d{4})", date_str, re.IGNORECASE)
-        if m3: return datetime.strptime(f"{m3.group(2)}-{m3.group(1)}-{m3.group(3)}", "%d-%b-%Y")
     except: pass
     return None
 
 def find_date_in_first_page(text):
     lines = text.split('\n')
     candidates = []
-    blacklist = ["RECEIVED", "PERIOD", "STARTED", "SUBMITTED", "COMPLETED", "TESTING", "收件", "接收", "周期", "期间"]
+    # 黑名單：加入韓文 "시험" (Test)
+    blacklist = ["RECEIVED", "PERIOD", "STARTED", "SUBMITTED", "COMPLETED", "TESTING", "收件", "接收", "周期", "期间", "시험"]
     
     for line in lines:
         upper_line = line.upper()
         if any(bad in upper_line for bad in blacklist): continue
             
-        if re.search(r"\d{4}[-/. ]\d{1,2}[-/. ]\d{1,2}", line) or \
+        # 抓取 YYYY.MM.DD 或 DD-Mon-YYYY
+        if re.search(r"\d{4}[-/. ]+\d{1,2}[-/. ]+\d{1,2}", line) or \
            (re.search(r"[A-Za-z]{3}", line) and re.search(r"\d{4}", line)):
             candidates.append(line)
             
@@ -115,39 +128,15 @@ def extract_value_logic(val_str, strict_numeric=False):
     
     if match:
         num = float(match.group(1))
-        if 2010 <= num <= 2030: return None, "" # Exclude years
+        if 2010 <= num <= 2030: return None, "" 
         return num, match.group(1)
     
     return None, ""
 
-def check_pfas_in_section(full_text):
-    start_keywords = ["TEST REQUESTED", "测试需求", "检测要求", "TEST REQUEST"]
-    end_keywords = ["TEST METHOD", "TEST RESULTS", "CONCLUSION", "测试结果", "结论", "检测方法"]
-    upper = full_text.upper()
-    
-    start_idx = -1
-    for kw in start_keywords:
-        idx = upper.find(kw)
-        if idx != -1: 
-            start_idx = idx
-            break
-    if start_idx == -1: return ""
-    
-    end_idx = len(upper)
-    for kw in end_keywords:
-        idx = upper.find(kw, start_idx)
-        if idx != -1: 
-            end_idx = idx
-            break
-            
-    target_text = upper[start_idx:end_idx]
-    if "PFAS" in target_text or "PER- AND POLYFLUOROALKYL" in target_text: return "REPORT"
-    return ""
-
-# --- 3. 核心處理邏輯 ---
+# --- 3. 核心功能模組 ---
 
 def find_sample_ids(full_text_pages_1_2):
-    """預讀樣品編號 (A1, A2, 001...)"""
+    """預讀樣品編號"""
     ids = []
     patterns = [
         r"(?:Sample|Specimen)\s*(?:No\.|ID|Ref\.?)\s*[:：]?\s*([A-Za-z0-9\-]+)",
@@ -159,11 +148,55 @@ def find_sample_ids(full_text_pages_1_2):
             m = re.search(pat, line, re.IGNORECASE)
             if m:
                 found_id = m.group(1).strip()
-                if len(found_id) < 10: ids.append(found_id.upper())
+                if len(found_id) < 15: ids.append(found_id.upper())
     return list(set(ids))
 
+def extract_visual_row_values(page_words, keywords):
+    """
+    [V17 核心] 視覺座標掃描引擎
+    page_words: pdfplumber.extract_words() 的結果
+    keywords: 要尋找的關鍵字列表 (字根)
+    """
+    found_values = []
+    
+    # 1. 尋找關鍵字所在的 Word 物件
+    target_words = []
+    for w in page_words:
+        txt = w['text'].upper()
+        # 使用字根匹配 (只要包含 Monobromo 就算)
+        if any(k.upper() in txt for k in keywords):
+            target_words.append(w)
+    
+    if not target_words:
+        return []
+
+    # 2. 針對每個找到的關鍵字，掃描「同一高度」的所有文字
+    for tw in target_words:
+        # 定義掃描區域 (Y軸中心點 +/- 3px)
+        y_center = (tw['top'] + tw['bottom']) / 2
+        tolerance = 5 
+        
+        # 找出所有在同一行的文字
+        row_words = [
+            w for w in page_words 
+            if abs((w['top'] + w['bottom']) / 2 - y_center) < tolerance
+        ]
+        
+        # 依 X 軸排序 (從左到右)
+        row_words.sort(key=lambda x: x['x0'])
+        
+        # 提取數值
+        for w in row_words:
+            v_num, v_disp = extract_value_logic(w['text'])
+            if v_num is not None:
+                # 智慧過濾: 排除 MDL/Limit
+                if v_num in [5, 10, 25, 50, 100, 1000] and v_disp != "N.D.": continue
+                found_values.append(v_num)
+    
+    return found_values
+
 def get_column_score(header_cells, sample_ids, is_sgs=False):
-    """V17 欄位定位：支援 Sample ID 與 SGS 絕對位置"""
+    """V17 表格定位"""
     scores = {}
     num_cols = len(header_cells)
     
@@ -177,15 +210,15 @@ def get_column_score(header_cells, sample_ids, is_sgs=False):
         
         if any(k in txt for k in known_cols_kw): score -= 500
         if any(res in txt for res in result_kw): score += 100
-        if txt in sample_ids: score += 200 # 命中預讀的 Sample ID
+        if txt in sample_ids: score += 500 # 命中 Sample ID 權重最高
         
-        if score == 0: score += 50 # 未知欄位可能是結果
+        if score == 0: score += 50 
         scores[i] = score
 
     if not scores: return -1
     best_col = max(scores, key=scores.get)
     
-    # SGS 特殊規則：如果沒有明確的 Result 欄位，但有 Limit/MDL，優先信任最後一欄
+    # SGS 專屬：若無明確結果欄，優先信任最右欄
     if is_sgs and scores[best_col] <= 50: 
         return num_cols - 1
         
@@ -201,10 +234,10 @@ def process_file(uploaded_file):
     results["Date"] = ""
     
     full_text_content = ""
-    is_sgs = "SGS" in filename.upper() # 簡單判斷是否為 SGS
+    is_sgs = "SGS" in filename.upper()
     
     with pdfplumber.open(uploaded_file) as pdf:
-        # A. 全文掃描
+        # A. 全文掃描 & 日期
         for i, page in enumerate(pdf.pages):
             text = page.extract_text()
             if text:
@@ -215,44 +248,26 @@ def process_file(uploaded_file):
         sample_ids = find_sample_ids(full_text_content[:3000])
         results["PFAS"] = check_pfas_in_section(full_text_content)
 
-        # --- 軌道 A: PBBs/PBDEs 跨行文字掃描 (V17) ---
-        text_lines = full_text_content.split('\n')
-        num_lines = len(text_lines)
-        
-        for i in range(num_lines):
-            line = text_lines[i].upper()
+        # --- 軌道 A: PBBs/PBDEs 視覺座標掃描 (Visual Engine) ---
+        # 遍歷每一頁，使用 extract_words 獲取座標
+        for page in pdf.pages:
+            words = page.extract_words()
             
-            def process_text_sum_multiline(keywords, cat_key, current_idx):
-                if any(k.upper() in line for k in keywords):
-                    # 1. 先在當前行找
-                    found_val = False
-                    potential_vals = []
-                    
-                    # 檢查當前行
-                    parts = text_lines[current_idx].split()
-                    for part in parts:
-                        v, d = extract_value_logic(part)
-                        if v is not None:
-                            if v in [5, 10, 25, 50, 100, 1000] and d != "N.D.": continue
-                            potential_vals.append(v)
-                    
-                    # 2. 如果當前行沒找到，檢查下一行 (跨行處理)
-                    if not potential_vals and current_idx + 1 < num_lines:
-                        parts_next = text_lines[current_idx + 1].split()
-                        for part in parts_next:
-                            v, d = extract_value_logic(part)
-                            if v is not None:
-                                if v in [5, 10, 25, 50, 100, 1000] and d != "N.D.": continue
-                                potential_vals.append(v)
-
-                    if potential_vals:
-                        val = potential_vals[-1]
-                        if val > 0:
-                            results[cat_key]["sum_val"] += val
-                            results[cat_key]["val"] = 1
-
-            process_text_sum_multiline(PBBS_KEYWORDS, "PBBs", i)
-            process_text_sum_multiline(PBDES_KEYWORDS, "PBDEs", i)
+            # 掃描 PBBs
+            pbb_vals = extract_visual_row_values(words, PBBS_ROOTS)
+            if pbb_vals:
+                val = pbb_vals[-1] # 取該行最後一個有效值
+                if val > 0:
+                    results["PBBs"]["sum_val"] += val
+                    results["PBBs"]["val"] = 1
+            
+            # 掃描 PBDEs
+            pbde_vals = extract_visual_row_values(words, PBDES_ROOTS)
+            if pbde_vals:
+                val = pbde_vals[-1]
+                if val > 0:
+                    results["PBDEs"]["sum_val"] += val
+                    results["PBDEs"]["val"] = 1
 
         # --- 軌道 B: 重金屬/單項 表格定位 (V17) ---
         for page in pdf.pages:
@@ -292,7 +307,7 @@ def process_file(uploaded_file):
                                 if result_col_idx != -1 and len(row) > result_col_idx:
                                     val_text = clean_text(row[result_col_idx])
                                 else:
-                                    val_text = clean_text(row[-1]) # Fallback to last column
+                                    val_text = clean_text(row[-1]) 
                                 
                                 is_strict = (field in ["Chlorine", "Bromine", "PFOS"])
                                 v_num, v_disp = extract_value_logic(val_text, strict_numeric=is_strict)
@@ -324,6 +339,10 @@ def process_file(uploaded_file):
     else:
         results["PBDEs"]["display"] = "N.D."
 
+    # 安全排序 (V17.1 Fix)
+    valid_vals = [v["val"] for k, v in results.items() if isinstance(v, dict) and v["val"] is not None]
+    sort_max = max(valid_vals) if valid_vals else 0
+
     final_output = {
         "File Name": filename,
         "Pb": results["Lead"]["display"],
@@ -343,8 +362,8 @@ def process_file(uploaded_file):
         "PFOS": results["PFOS"]["display"],
         "PFAS": results["PFAS"],
         "Date": results["Date"],
-        "_sort_pb": results["Lead"]["val"],
-        "_sort_max": max([v["val"] for k, v in results.items() if isinstance(v, dict) and v["val"] is not None])
+        "_sort_pb": results["Lead"]["val"] if results["Lead"]["val"] is not None else 0,
+        "_sort_max": sort_max
     }
     
     return final_output, None
@@ -356,7 +375,7 @@ if uploaded_files:
     all_data = []
     scanned_files = []
 
-    with st.spinner('正在進行 V17 引擎分析 (跨行文字流 + 樣品 ID 鎖定)...'):
+    with st.spinner('正在進行 V17 視覺引擎分析 (視覺座標 + 字典擴充)...'):
         for pdf_file in uploaded_files:
             data, scanned_name = process_file(pdf_file)
             if scanned_name:
@@ -366,6 +385,7 @@ if uploaded_files:
 
     if all_data:
         df = pd.DataFrame(all_data)
+        # 排序
         if "_sort_pb" in df.columns:
             df = df.sort_values(by=["_sort_pb", "_sort_max"], ascending=[False, False])
             display_df = df.drop(columns=["_sort_pb", "_sort_max"])
@@ -379,7 +399,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel/CSV 報表",
             data=csv,
-            file_name="rohs_report_v17_final.csv",
+            file_name="rohs_report_v17_visual.csv",
             mime="text/csv",
         )
 
