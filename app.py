@@ -1,4 +1,4 @@
-pip install pdfplumber pandas
+#pip install pdfplumber pandas
 import pdfplumber
 import pandas as pd
 import re
@@ -210,3 +210,4 @@ def aggregate_reports(file_paths):
 # df = df[cols]
 # print(df)
 # df.to_excel("Summary_Report.xlsx", index=False)
+
