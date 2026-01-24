@@ -3,7 +3,6 @@ import pdfplumber
 import pandas as pd
 import re
 import io
-import os
 from dateutil import parser
 
 # ==========================================
@@ -35,8 +34,7 @@ KEYWORDS_MAP_GLOBAL = {
     r"(?i)\b(PFOS|Perfluorooctane\s*sulfonates)\b": "PFOS"
 }
 
-# --- CTI 專屬字典 (新增中文支援與 PFOS 精確鎖定) ---
-# 注意：PFOA 已在此排除，PBBs/PBDEs 保持原樣
+# --- CTI 專屬字典 (修正鹵素、新增中文金屬、PFOS精確鎖定) ---
 CTI_KEYWORDS_MAP = {
     # 重金屬 (中英雙軌)
     r"(?i)\b(Lead|Pb|铅)\b": "Pb",
@@ -44,24 +42,23 @@ CTI_KEYWORDS_MAP = {
     r"(?i)\b(Mercury|Hg|汞)\b": "Hg",
     r"(?i)\b(Hexavalent Chromium|Cr\(?VI\)?|六价铬)\b": "Cr6+",
     
-    # 塑化劑 (通常只有英文或簡寫)
+    # 塑化劑
     r"(?i)\b(DEHP|Di\(2-ethylhexyl\)\s*phthalate)\b": "DEHP",
     r"(?i)\b(DBP|Dibutyl\s*phthalate)\b": "DBP",
     r"(?i)\b(BBP|Butyl\s*benzyl\s*phthalate)\b": "BBP",
     r"(?i)\b(DIBP|Diisobutyl\s*phthalate)\b": "DIBP",
     
-    # 鹵素 (中英雙軌)
-    r"(?i)^(Fluorine|F|氟)(\s*\(F\))?$": "F",
-    r"(?i)^(Chlorine|Cl|氯)(\s*\(Cl\))?$": "Cl",
-    r"(?i)^(Bromine|Br|溴)(\s*\(Br\))?$": "Br",
-    r"(?i)^(Iodine|I|碘)(\s*\(I\))?$": "I",
+    # 鹵素 (特徵匹配：名稱 + 化學符號，容錯率高)
+    r"(?i)(Fluorine|氟).*\((F|F-)\)": "F",
+    r"(?i)(Chlorine|氯|氣).*\((Cl|Cl-)\)": "Cl",  # 包含 '氣' 以防 OCR 錯字
+    r"(?i)(Bromine|溴).*\((Br|Br-)\)": "Br",
+    r"(?i)(Iodine|碘).*\((I|I-)\)": "I",
     
     # PFOS (精確鎖定，排除 PFOA/Total)
-    # 包含：PFOS 及其盐, PFOS and its salts, 全氟辛烷磺酸, Perfluorooctane Sulfonates (PFOS)
     r"(?i)(PFOS\s*(及其盐|and its salts)|全氟辛烷磺酸|Perfluorooctane\s*Sulfonates\s*\(PFOS\))": "PFOS"
 }
 
-# PBBs/PBDEs 加總用關鍵字 (維持原樣，不加中文)
+# PBBs/PBDEs 加總用關鍵字 (維持原樣)
 PBB_SUBITEMS = r"(?i)(Monobromobiphenyl|Dibromobiphenyl|Tribromobiphenyl|Tetrabromobiphenyl|Pentabromobiphenyl|Hexabromobiphenyl|Heptabromobiphenyl|Octabromobiphenyl|Nonabromobiphenyl|Decabromobiphenyl)"
 PBDE_SUBITEMS = r"(?i)(Monobromodiphenyl ether|Dibromodiphenyl ether|Tribromodiphenyl ether|Tetrabromodiphenyl ether|Pentabromodiphenyl ether|Hexabromodiphenyl ether|Heptabromodiphenyl ether|Octabromodiphenyl ether|Nonabromodiphenyl ether|Decabromodiphenyl ether)"
 
@@ -73,7 +70,6 @@ def standardize_date(date_str):
     """標準化日期格式為 YYYY/MM/DD"""
     if not date_str: return "1900/01/01"
     clean_str = str(date_str).strip()
-    
     clean_str = clean_str.replace("年", "/").replace("月", "/").replace("日", "")
     # 支援 2024. 10. 17. (韓系/CTI) -> 2024/10/17
     clean_str = re.sub(r"(\d{4})[\.\s]+(\d{1,2})[\.\s]+(\d{1,2})\.?", r"\1/\2/\3", clean_str)
@@ -141,7 +137,6 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                 if not table: continue
                 header = table[0]
                 
-                # 計分
                 col_scores = {}
                 for idx, col in enumerate(header):
                     col_str = str(col).strip()
@@ -196,26 +191,25 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
     result["PBDEs"] = pbde_sum if pbde_found and pbde_sum > 0 else "N.D."
     return result
 
-# --- CTI Parser (邏輯重構：倒敘日期 + 防呆 + 專屬字典) ---
+# --- CTI Parser (日期重構 + 樣品編號跳過 + 鹵素/PFOS修正) ---
 def parse_cti(pdf_obj, full_text, first_page_text):
-    # 初始化，使用 KEYWORDS_MAP_GLOBAL 的 key 作為基礎，但邏輯用 CTI_KEYWORDS_MAP
     result = {k: None for k in KEYWORDS_MAP_GLOBAL.values()}
     result['PFAS'] = ""
     result['DATE'] = ""
     
     # 1. 日期抓取：倒敘搜尋法 (Bottom-Up)
-    # 說明：CTI 發行日期通常在第一頁右下角，且 PDF 順序中排在最後
+    # 說明：CTI 發行日期通常在第一頁右下角
     lines = first_page_text.split('\n')
     date_pat = re.compile(r"(20\d{2}[\.\-/]\d{2}[\.\-/]\d{2}|[A-Za-z]{3}\.?\s+\d{1,2},?\s+20\d{2})")
     
     for line in reversed(lines):
-        # 排除干擾關鍵字 (接收日期、測試週期、修訂版)
+        # 排除干擾關鍵字
         if re.search(r"(?i)(Received|Testing|Period|Rev\.|Revis)", line): continue
         
         match = date_pat.search(line)
         if match:
             result['DATE'] = standardize_date(match.group(0))
-            break # 找到最後一個(最下面)的有效日期就停止
+            break
             
     # 2. 表格數據
     pbb_sum = 0; pbde_sum = 0; pbb_found = False; pbde_found = False
@@ -226,8 +220,7 @@ def parse_cti(pdf_obj, full_text, first_page_text):
             for table in tables:
                 if not table: continue
                 header = table[0]
-                header_str = " ".join([str(c) for c in header if c])
-
+                
                 # 必須有 Result/结果 才是有效表格
                 res_idx = -1
                 for i, col in enumerate(header):
@@ -235,7 +228,6 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                         res_idx = i
                         break
                 
-                # 如果找不到 Result 欄位，嘗試找 MDL 左邊或右邊 (Fallback)
                 if res_idx == -1:
                     for i, col in enumerate(header):
                         if col and re.search(r"(?i)(MDL|LOQ|RL|Limit)", str(col)):
@@ -243,7 +235,7 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                             else: res_idx = i + 1
                             break
                 
-                if res_idx == -1: continue # 放棄此表
+                if res_idx == -1: continue
 
                 for row_idx, row in enumerate(table[1:]):
                     if len(row) <= res_idx: continue
@@ -258,11 +250,8 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                     raw_val = str(row[res_idx]).strip()
                     val = clean_value(raw_val)
                     
-                    # 如果抓到的值是整數(如 001, 26) 且不像正常測試結果(通常有小數或N.D.)
-                    # 且這行看起來不是測試項目行，或者我們懷疑這是編號
-                    # CTI 鍍層報告特性：Result 下面一行是 "001"
                     if re.search(r"^0\d+$", raw_val) or (re.search(r"^\d{1,3}$", raw_val) and "mg/kg" not in raw_val):
-                        # 這可能是樣品編號，嘗試往下一行抓取 (如果存在)
+                        # 這可能是樣品編號，嘗試往下一行抓取
                         if row_idx + 1 < len(table[1:]):
                             next_row = table[1:][row_idx+1]
                             if len(next_row) > res_idx:
@@ -274,7 +263,7 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                     # --- 使用 CTI 專屬字典匹配 ---
                     for pat, key in CTI_KEYWORDS_MAP.items():
                         if re.search(pat, row_str):
-                            # 額外 PFOS 防呆：排除 Total, PFOSF, Derivative
+                            # PFOS 防呆：排除 Total, PFOSF, Derivative
                             if key == "PFOS":
                                 if re.search(r"(?i)(Total|PFOSF|Derivative|总和|衍生物)", row_str):
                                     continue
@@ -426,7 +415,7 @@ def main():
     1. **日期邏輯**：採用倒敘搜尋，排除接收/測試日期，精準抓取頁尾發行日期。
     2. **PFOS 邏輯**：精確鎖定 `PFOS and its salts` / `全氟辛烷磺酸`，並排除 `PFOA`。
     3. **表格防呆**：自動跳過結果欄中的樣品編號 (如 001, 002)，抓取正確數值。
-    4. **字典擴充**：支援中文金屬、鹵素關鍵字。
+    4. **鹵素識別**：修正 `Fluorine (F)`、`Chlorine (Cl)` 等中英混排與錯字問題。
     """)
 
     uploaded_files = st.file_uploader("請上傳 PDF 報告", type="pdf", accept_multiple_files=True)
