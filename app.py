@@ -2,17 +2,16 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 import re
-import math
+from datetime import datetime
 
 # --- 設定頁面 ---
-st.set_page_config(page_title="通用檢測報告擷取工具 (V13 穩定修正版)", layout="wide")
-st.title("🧪 通用型第三方檢測報告數據擷取工具 (V13 穩定修正版)")
+st.set_page_config(page_title="通用檢測報告擷取工具 (V14 最終全能版)", layout="wide")
+st.title("🧪 通用型第三方檢測報告數據擷取工具 (V14 最終全能版)")
 st.markdown("""
-**V13 核心策略：回歸 V10 架構 + 精準修補**
-1.  **🎯 絕對欄位定位**：廢除智慧掃描，嚴格讀取 Result 欄位，徹底解決誤抓 CAS No. (如 85, 1763) 的問題。
-2.  **⚓ 重金屬 (Pb)**：維持「黃金欄位鎖定」，跟隨 Cd/Hg，確保數值準確。
-3.  **∑ 有機物 (PBBs)**：維持「子項目加總」，掃描全表累加。
-4.  **🔧 PFOS/Cl 修正**：PFOS 改為單項抓取；Cl 增加型別檢查 (拒絕 Negative)，解決誤判。
+**V14 版本更新摘要：**
+1.  **📅 日期鎖定 V2**：引入「黑名單過濾」與「最晚日期法則」，精準鎖定發行日，排除接收/測試日。
+2.  **∑ 有機物優化**：PBBs/PBDEs 採用「全行掃描+智慧過濾」，不依賴欄位，解決 Intertek 空值問題。
+3.  **🎯 核心保留**：Pb 黃金欄位、Cl PVC 防火牆、PFOS 單項直取。
 """)
 
 # --- 1. 定義目標欄位 ---
@@ -46,72 +45,112 @@ def clean_text(text):
     if not text: return ""
     return re.sub(r'\s+', ' ', str(text)).strip()
 
-def normalize_date(date_str):
-    if not date_str: return ""
-    clean_date = re.sub(r"Date:|Issue Date:|Report Date:|日期\s*\(?Date\)?[:：]?", "", date_str, flags=re.IGNORECASE).strip()
+def parse_date_obj(date_str):
+    """將字串解析為 datetime 物件，用於比較日期先後"""
+    clean = re.sub(r"Date:|Issue Date:|Report Date:|日期\s*\(?Date\)?[:：]?", "", date_str, flags=re.IGNORECASE).strip()
+    clean = clean.replace("/", "-").replace(".", "-").replace(" ", "-")
+    
+    # 嘗試常見格式
+    formats = [
+        "%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y", "%b-%d-%Y", "%B-%d-%Y",
+        "%d-%b-%y", "%d-%B-%y"
+    ]
+    
+    for fmt in formats:
+        try:
+            return datetime.strptime(clean, fmt)
+        except:
+            continue
+            
+    # 嘗試 Regex 提取
     try:
-        match_num = re.search(r"(\d{4})[-/. ](\d{1,2})[-/. ](\d{1,2})", clean_date)
-        if match_num:
-            return f"{match_num.group(1)}/{int(match_num.group(2)):02d}/{int(match_num.group(3)):02d}"
+        # 2025-06-16
+        m = re.search(r"(\d{4})[-/. ](\d{1,2})[-/. ](\d{1,2})", date_str)
+        if m: return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         
-        months = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6, 
-                  "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+        # 16-Jun-2025
+        m2 = re.search(r"(\d{1,2})[-/\s]([A-Za-z]{3})[-/\s](\d{4})", date_str, re.IGNORECASE)
+        if m2: return datetime.strptime(f"{m2.group(1)}-{m2.group(2)}-{m2.group(3)}", "%d-%b-%Y")
         
-        match_dd_mon_yy = re.search(r"(\d{1,2})[-/\s]([A-Za-z]{3})[-/\s](\d{2,4})", clean_date, re.IGNORECASE)
-        if match_dd_mon_yy:
-            d, m_str, y = match_dd_mon_yy.groups()
-            m = months.get(m_str.upper(), 0)
-            if m > 0:
-                if len(y) == 2: y = "20" + y
-                return f"{y}/{m:02d}/{int(d):02d}"
-
-        match_mon_dd_yyyy = re.search(r"([A-Za-z]{3})\.?\s+(\d{1,2}),?\s+(\d{4})", clean_date, re.IGNORECASE)
-        if match_mon_dd_yyyy:
-            m_str, d, y = match_mon_dd_yyyy.groups()
-            m = months.get(m_str.upper(), 0)
-            if m > 0:
-                return f"{y}/{m:02d}/{int(d):02d}"
+        # Jun 16, 2025
+        m3 = re.search(r"([A-Za-z]{3})\.?\s+(\d{1,2}),?\s+(\d{4})", date_str, re.IGNORECASE)
+        if m3: return datetime.strptime(f"{m3.group(2)}-{m3.group(1)}-{m3.group(3)}", "%d-%b-%Y")
     except:
         pass
+    return None
+
+def normalize_date_str(dt_obj):
+    """將 datetime 物件轉為 YYYY/MM/DD 字串"""
+    if dt_obj:
+        return dt_obj.strftime("%Y/%m/%d")
     return ""
 
 def find_date_in_first_page(text):
+    """
+    V14 日期抓取邏輯：
+    1. 黑名單過濾 (Received, Period, Started...)
+    2. 收集所有候選日期
+    3. 取「最晚」的一個日期 (Issue Date 通常是最後發生的)
+    """
     lines = text.split('\n')
+    candidates = []
+    
+    blacklist = ["RECEIVED", "PERIOD", "STARTED", "SUBMITTED", "COMPLETED", "收件", "週期", "期间"]
+    
     for line in lines:
-        if "RECEIVED" in line.upper() or "PERIOD" in line.upper() or "STARTED" in line.upper(): continue
-        if re.search(r"(Date|Issue Date|Report Date|日期)[:：\s\(]", line, re.IGNORECASE):
-            m1 = re.search(r"(\d{4}[-/. ]\d{1,2}[-/. ]\d{1,2})", line)
-            if m1: return normalize_date(m1.group(1))
-            m2 = re.search(r"([A-Za-z]{3}\.?\s+\d{1,2},?\s+\d{4})", line)
-            if m2: return normalize_date(m2.group(1))
-            m3 = re.search(r"(\d{1,2}-[A-Za-z]{3}-\d{2,4})", line)
-            if m3: return normalize_date(m3.group(1))
+        upper_line = line.upper()
+        # 1. 黑名單過濾：如果該行包含黑名單關鍵字，直接跳過
+        if any(bad in upper_line for bad in blacklist):
+            continue
+            
+        # 2. 尋找日期格式 (YYYY/MM/DD, DD-Mon-YYYY)
+        # 格式 A: 2025.06.16 或 2025/06/16
+        if re.search(r"\d{4}[-/. ]\d{1,2}[-/. ]\d{1,2}", line):
+            candidates.append(line)
+        # 格式 B: 16-Jun-2025 或 Jun 16, 2025
+        elif re.search(r"[A-Za-z]{3}", line) and re.search(r"\d{4}", line):
+            candidates.append(line)
+            
+    if not candidates:
+        return ""
+        
+    # 3. 解析候選日期並找出最晚的一天
+    valid_dates = []
+    for c in candidates:
+        dt = parse_date_obj(c)
+        if dt:
+            # 簡單過濾：年份必須合理 (例如 2010~2030)
+            if 2010 <= dt.year <= 2030:
+                valid_dates.append(dt)
+    
+    if valid_dates:
+        latest_date = max(valid_dates) # 取最晚日期
+        return normalize_date_str(latest_date)
+        
     return ""
 
 def extract_value_logic(val_str, strict_numeric=False):
     """
-    V13 數值提取邏輯
-    strict_numeric: 若為 True，則拒絕 Negative/Positive，只接受數字或 N.D. (用於 Cl/Br/PFOS)
+    數值提取邏輯
+    strict_numeric: 用於 Cl/PFOS，拒絕 Negative
     """
     if not val_str: return None, ""
     
     val_upper = str(val_str).upper().replace(" ", "")
     
-    # 1. CAS 防火牆 (絕對不抓 CAS No.)
+    # CAS 防火牆
     if re.search(r"\b\d{2,7}-\d{2}-\d\b", val_str): return None, ""
 
-    # 2. 文字狀態
     if "N.D." in val_upper or "ND" in val_upper or "<" in val_upper: return 0, "N.D."
     
     if "NEGATIVE" in val_upper or "阴性" in val_upper: 
-        if strict_numeric: return None, "" # 鹵素/PFOS 測試中 Negative 是無效值 (可能是 PVC)
+        if strict_numeric: return None, "" # Cl/PFOS 不接受 Negative
         return 0.0001, "NEGATIVE"
         
     if "POSITIVE" in val_upper or "阳性" in val_upper: 
         if strict_numeric: return None, ""
         return 999999, "POSITIVE"
     
-    # 3. 數字提取
     val_clean = re.sub(r"(mg/kg|ppm|%|µg/cm²|ug/cm2)", "", val_str, flags=re.IGNORECASE)
     match = re.search(r"(\d+(\.\d+)?)", val_clean)
     
@@ -124,6 +163,7 @@ def extract_value_logic(val_str, strict_numeric=False):
     return None, ""
 
 def check_pfas_in_section(full_text):
+    """PFAS 區塊限定"""
     start_keywords = ["TEST REQUESTED", "測試需求", "TEST REQUEST"]
     end_keywords = ["TEST METHOD", "TEST RESULTS", "CONCLUSION", "測試結果", "結論"]
     
@@ -151,13 +191,10 @@ def check_pfas_in_section(full_text):
     return ""
 
 def get_column_score(header_cells, table_data=None):
-    """
-    V13 欄位評分：找出最像 Result 的欄位索引
-    """
+    """找出最像 Result 的欄位索引"""
     scores = {} 
     num_cols = len(header_cells)
     
-    # 關鍵字定義
     exclude_kw = ["ITEM", "METHOD", "UNIT", "MDL", "LOQ", "LIMIT", "REQUIREMENT", "项目", "方法", "单位", "限值", "RL", "CAS", "NO.", "序"]
     result_kw = ["RESULT", "结果", "SAMPLE", "ID", "001", "002", "A1", "DATA", "含量"]
     mdl_kw = ["MDL", "LOQ", "RL", "LIMIT", "限值"]
@@ -167,12 +204,10 @@ def get_column_score(header_cells, table_data=None):
         txt = clean_text(str(cell)).upper()
         
         score = 0
-        # 1. 標題特徵
         if any(ex in txt for ex in exclude_kw): score -= 100
         if any(res in txt for res in result_kw): score += 50
-        if "CAS" in txt: score -= 200 # CAS 絕對排除
+        if "CAS" in txt: score -= 200 
         
-        # 2. 鄰居關係
         if i + 1 < num_cols:
             right_txt = clean_text(str(header_cells[i+1])).upper()
             if any(k in right_txt for k in mdl_kw): score += 30
@@ -182,12 +217,11 @@ def get_column_score(header_cells, table_data=None):
             
         scores[i] = score
 
-    # 3. 內容採樣 (Data Fingerprinting)
     if table_data and len(table_data) > 3:
         for i in range(num_cols):
             if i not in scores: continue
             sample_vals = []
-            for row in table_data[1:6]: # 採樣前幾行
+            for row in table_data[1:6]:
                 if i < len(row): sample_vals.append(clean_text(str(row[i])).upper())
             
             is_numeric_or_nd = 0
@@ -196,27 +230,23 @@ def get_column_score(header_cells, table_data=None):
             is_float = 0
             
             for val in sample_vals:
-                if "N.D." in val or "NEGATIVE" in val or re.search(r"^\d+(\.\d+)?$", val):
-                    is_numeric_or_nd += 1
-                if re.search(r"^\d+\.\d+$", val):
-                    is_float += 1 # 浮點數是強特徵 (區分 Limit 1000)
-                if re.search(r"\d{2,7}-\d{2}-\d", val): 
-                    is_cas += 1
-                if "IEC" in val or "EPA" in val: 
-                    is_method += 1
+                if "N.D." in val or "NEGATIVE" in val or re.search(r"^\d+(\.\d+)?$", val): is_numeric_or_nd += 1
+                if re.search(r"^\d+\.\d+$", val): is_float += 1
+                if re.search(r"\d{2,7}-\d{2}-\d", val): is_cas += 1
+                if "IEC" in val or "EPA" in val: is_method += 1
             
-            if is_cas > 0: scores[i] -= 200 # 這一欄是 CAS，扣分
-            if is_method > 0: scores[i] -= 100 # 這一欄是 Method，扣分
+            if is_cas > 0: scores[i] -= 200
+            if is_method > 0: scores[i] -= 100
             if is_numeric_or_nd > 0: scores[i] += 20
-            if is_float > 0: scores[i] += 100 # 這一欄有 3.53，加分
+            if is_float > 0: scores[i] += 100
 
     if not scores: return -1
     best_col = max(scores, key=scores.get)
-    if scores[best_col] < -50: return -1 # 門檻
+    if scores[best_col] < -50: return -1
     return best_col
 
 def find_golden_column(table, result_col_idx):
-    """ V13 黃金欄位：利用 Cd/Hg 鎖定 """
+    """利用 Cd/Hg 鎖定 Result 欄位"""
     if result_col_idx == -1: return False
     score = 0
     for row in table:
@@ -254,7 +284,7 @@ def process_file(uploaded_file):
         if is_scanned: return None, filename
         results["PFAS"] = check_pfas_in_section(full_text_content)
 
-        # B. 表格數據提取 (V13 回歸版)
+        # B. 表格數據提取 (V14 分流與優化)
         for page in pdf.pages:
             tables = page.extract_tables()
             if tables:
@@ -264,7 +294,7 @@ def process_file(uploaded_file):
                     header_row_idx = -1
                     result_col_idx = -1
                     
-                    # 1. 定位表頭與結果欄
+                    # 1. 定位 Result 欄位 (為了重金屬和單項)
                     for r_idx, row in enumerate(table[:6]):
                         row_str = " ".join([str(c).upper() for c in row if c])
                         if ("ITEM" in row_str or "项目" in row_str) and ("UNIT" in row_str or "MDL" in row_str or "RESULT" in row_str or "结果" in row_str):
@@ -286,38 +316,41 @@ def process_file(uploaded_file):
                         if len(row) > 1: item_name += " " + clean_text(row[1])
                         item_upper = item_name.upper()
 
-                        # --- 策略 A: PBBs/PBDEs 全域加總 (不依賴 Result 欄位，掃描整行) ---
-                        # 這部分維持 V10 的暴力加總法，因為它最穩
-                        for pbb_kw in PBBS_KEYWORDS + PBDES_KEYWORDS:
-                            if re.search(pbb_kw, item_upper, re.IGNORECASE):
-                                # 在這一行裡找數值 (避開 Limit/MDL)
+                        # =======================================================
+                        # [V14] 策略 A: PBBs/PBDEs 全域加總 + 智慧過濾
+                        # =======================================================
+                        def process_organic_sum(keywords_list, category_key):
+                            if any(re.search(kw, item_upper, re.IGNORECASE) for kw in keywords_list):
+                                # 掃描整行，尋找合適數值
                                 potential_vals = []
                                 for cell in row:
                                     v_num, v_disp = extract_value_logic(clean_text(str(cell)))
                                     if v_num is not None:
-                                        if v_num in [5, 10, 1000] and v_disp != "N.D.": continue # 簡單過濾
+                                        # [關鍵] 排除 Limit (1000) 和 MDL (5, 10) 干擾
+                                        if v_num in [5, 10, 50, 100, 1000] and v_disp != "N.D.": 
+                                            continue 
                                         potential_vals.append(v_num)
                                 
                                 if potential_vals:
                                     val = potential_vals[-1] # 取最後一個有效值
                                     if val > 0:
-                                        cat = "PBBs" if any(k in pbb_kw for k in PBBS_KEYWORDS) else "PBDEs"
-                                        results[cat]["sum_val"] += val
-                                        results[cat]["val"] = 1
+                                        results[category_key]["sum_val"] += val
+                                        results[category_key]["val"] = 1
 
-                        # --- 策略 B: 單項數值 (Pb, Cd, Cl, PFOS...) ---
-                        # 嚴格使用 result_col_idx，不亂掃描
+                        process_organic_sum(PBBS_KEYWORDS, "PBBs")
+                        process_organic_sum(PBDES_KEYWORDS, "PBDEs")
+
+                        # =======================================================
+                        # [V14] 策略 B: 單項數值 (Pb, Cl, PFOS) - 依賴欄位定位
+                        # =======================================================
                         if result_col_idx != -1 and len(row) > result_col_idx:
                             val_text = clean_text(row[result_col_idx])
                             
-                            # 針對重金屬，如果是 Golden Table，強制使用
-                            # 針對其他項目，也是使用此欄位，但要過濾 PVC
-                            
                             # 語義防火牆 (Cl)
                             if "CHLORINE" in item_upper and ("POLYVINYL" in item_upper or "PVC" in item_upper):
-                                continue # 跳過 PVC 行
+                                continue
 
-                            # 嚴格型別檢查 (Cl, Br, PFOS)
+                            # 嚴格型別 (Cl, Br, PFOS)
                             is_strict = any(x in item_upper for x in ["CHLORINE", "BROMINE", "PFOS", "FLUORINE", "IODINE"])
                             
                             val_num, val_disp = extract_value_logic(val_text, strict_numeric=is_strict)
@@ -344,7 +377,7 @@ def process_file(uploaded_file):
                 for y, row_words in rows.items():
                     line_text = " ".join([w['text'] for w in row_words])
                     
-                    # 補漏 PBBs/PBDEs (文字流)
+                    # 補漏 PBBs (文字流模式)
                     for pbb_kw in PBBS_KEYWORDS + PBDES_KEYWORDS:
                         if re.search(pbb_kw, line_text, re.IGNORECASE):
                              for w in row_words:
@@ -435,7 +468,7 @@ if uploaded_files:
     all_data = []
     scanned_files = []
 
-    with st.spinner('正在進行 V13 引擎分析 (回歸 V10 架構 + 精準修復)...'):
+    with st.spinner('正在進行 V14 引擎分析 (全能日期鎖定 + 有機物全域掃描)...'):
         for pdf_file in uploaded_files:
             data, scanned_name = process_file(pdf_file)
             if scanned_name:
@@ -451,14 +484,14 @@ if uploaded_files:
         else:
             display_df = df
         
-        st.success(f"✅ 成功擷取 {len(all_data)} 份報告！(V13 核心)")
+        st.success(f"✅ 成功擷取 {len(all_data)} 份報告！(V14 核心)")
         st.dataframe(display_df, use_container_width=True)
         
         csv = display_df.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
             label="📥 下載 Excel/CSV 報表",
             data=csv,
-            file_name="rohs_report_v13_stable.csv",
+            file_name="rohs_report_v14_final.csv",
             mime="text/csv",
         )
 
