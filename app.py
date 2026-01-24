@@ -1,213 +1,268 @@
-#pip install pdfplumber pandas
+import streamlit as st
 import pdfplumber
 import pandas as pd
 import re
 from datetime import datetime
-import os
+import io
 
-# 定義要提取的化學物質關鍵字映射 (根據報告常見寫法)
-# 格式: '標準欄位名': ['報告中可能的名稱1', '報告中可能的名稱2']
+# --- 頁面設定 ---
+st.set_page_config(page_title="RoHS/REACH 報告彙整工具", layout="wide")
+st.title("📄 化學檢測報告數據自動彙整工具")
+st.markdown("""
+本工具支援 SGS 與 CTI 格式報告。
+**邏輯說明：**
+1. **數值取樣：** 多份報告中取最大值 (數字 > N.D.)。
+2. **PFAS 判斷：** 僅當「Test Requested/檢測要求」欄位明確出現 "PFAS" 字串時顯示 "REPORT"。
+3. **FILE NAME：** 顯示鉛 (Pb) 數值最高的來源檔名。
+""")
+
+# --- 核心關鍵字映射 ---
+# 根據上傳的文件內容優化關鍵字
 KEYWORDS_MAP = {
-    'Pb': ['Lead', 'Pb'],
-    'Cd': ['Cadmium', 'Cd'],
-    'Hg': ['Mercury', 'Hg'],
-    'Cr6+': ['Hexavalent Chromium', 'Cr(VI)', 'Cr6+'],
-    'PBB': ['PBBs', 'Polybrominated biphenyls', 'Sum of PBBs'],
-    'PBDE': ['PBDEs', 'Polybrominated diphenyl ethers', 'Sum of PBDEs'],
-    'DEHP': ['DEHP', 'Bis(2-ethylhexyl) phthalate'],
-    'DBP':  ['DBP', 'Dibutyl phthalate'],
-    'BBP':  ['BBP', 'Butyl benzyl phthalate'],
-    'DIBP': ['DIBP', 'Diisobutyl phthalate'],
-    'F':    ['Fluorine', 'F', 'Halogen-Fluorine'],
-    'CL':   ['Chlorine', 'Cl', 'Halogen-Chlorine'],
-    'BR':   ['Bromine', 'Br', 'Halogen-Bromine'],
-    'PFOS': ['Perfluorooctane sulfonates', 'PFOS'],
+    'Pb': ['Lead', 'Pb', '铅'],
+    'Cd': ['Cadmium', 'Cd', '镉'],
+    'Hg': ['Mercury', 'Hg', '汞'],
+    'Cr6+': ['Hexavalent Chromium', 'Cr(VI)', 'Cr6+', '六价铬'],
+    'PBB': ['PBBs', 'Polybrominated biphenyls', 'Sum of PBBs', '多溴联苯'],
+    'PBDE': ['PBDEs', 'Polybrominated diphenyl ethers', 'Sum of PBDEs', '多溴二苯醚'],
+    'DEHP': ['DEHP', 'Bis(2-ethylhexyl) phthalate', '邻苯二甲酸二(2-乙基己基)酯'],
+    'DBP':  ['DBP', 'Dibutyl phthalate', '邻苯二甲酸二丁酯'],
+    'BBP':  ['BBP', 'Butyl benzyl phthalate', '邻苯二甲酸丁苄酯'],
+    'DIBP': ['DIBP', 'Diisobutyl phthalate', '邻苯二甲酸二异丁酯'],
+    'F':    ['Fluorine', 'Halogen-Fluorine', '氟', 'Fluorine (F)'],
+    'CL':   ['Chlorine', 'Halogen-Chlorine', '氯', 'Chlorine (Cl)'],
+    'BR':   ['Bromine', 'Halogen-Bromine', '溴', 'Bromine (Br)'],
+    'PFOS': ['Perfluorooctane sulfonates', 'PFOS', '全氟辛烷磺酸'],
 }
 
+# --- 輔助函式：日期解析 ---
 def parse_date(date_str):
-    """將不同格式的日期統一轉換為 YYYY/MM/DD"""
+    """
+    解析多種日期格式，統一回傳 datetime 物件
+    支援格式: 
+    - Feb 27, 2025 (SGS)
+    - 2025.06.16 (CTI)
+    - 27-Feb-2025 (CTI)
+    """
     if not date_str:
         return None
     
-    # 處理常見格式
+    date_str = date_str.strip()
+    # 定義常見日期格式
     formats = [
-        "%b %d, %Y",      # Feb 27, 2025 (SGS) [1]
-        "%Y.%m.%d",       # 2025.06.16 (CTI)
+        "%b %d, %Y",      # Feb 27, 2025
+        "%Y.%m.%d",       # 2025.06.16
+        "%d-%b-%Y",       # 27-Feb-2025
         "%Y/%m/%d",
-        "%d-%b-%Y"        # 27-Feb-2025 [2]
+        "%Y-%m-%d",
+        "%Y年%m月%d日"
     ]
     
     for fmt in formats:
         try:
-            dt = datetime.strptime(date_str.strip(), fmt)
-            return dt
+            return datetime.strptime(date_str, fmt)
         except ValueError:
             continue
     return None
 
-def extract_pdf_data(file_path):
-    """從單個 PDF 提取數據"""
-    data = {key: "N.D." for key in KEYWORDS_MAP.keys()} # 預設為 N.D.
-    data['PFAS'] = "" # 預設空白
+# --- 核心函式：單一 PDF 解析 ---
+def extract_pdf_data(file_obj, filename):
+    data = {key: "N.D." for key in KEYWORDS_MAP.keys()}
+    data['PFAS'] = ""
     data['DATE'] = None
-    data['DATE_RAW'] = ""
+    data['Filename'] = filename
     
-    filename = os.path.basename(file_path)
-    
-    with pdfplumber.open(file_path) as pdf:
-        full_text = ""
-        
-        # 1. 遍歷每一頁提取文字與表格
-        for page in pdf.pages:
-            text = page.extract_text()
-            full_text += text + "\n"
+    full_text = ""
+    header_text = "" # 用於搜尋 Test Requested 和日期
+
+    try:
+        with pdfplumber.open(file_obj) as pdf:
+            # 1. 讀取頁面內容
+            for i, page in enumerate(pdf.pages):
+                text = page.extract_text()
+                if text:
+                    full_text += text + "\n"
+                    if i < 3: # 通常關鍵資訊在前 3 頁
+                        header_text += text + "\n"
+
+            # 2. 提取日期 (Date)
+            # Regex 針對 SGS 和 CTI 格式進行匹配
+            date_patterns = [
+                r"Date:\s*([A-Z][a-z]{2}\s\d{1,2},\s\d{4})",  # SGS: Date: Feb 27, 2025
+                r"Date:\s*(\d{4}\.\d{2}\.\d{2})",             # CTI: Date: 2025.06.16
+                r"Date:\s*(\d{2}-[A-Z][a-z]{2}-\d{4})",       # CTI: Date: 27-Feb-2025
+                r"日期：\s*(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)"
+            ]
             
-            # --- 提取日期 (通常在第一頁或頁眉) ---
-            if not data['DATE']:
-                # 針對 SGS: Date: Feb 27, 2025 [1]
-                date_match_sgs = re.search(r"Date:\s*([A-Z][a-z]{2}\s\d{1,2},\s\d{4})", text)
-                # 針對 CTI: Date: 2025.03.05 [3] 或 27-Feb-2025 [2]
-                date_match_cti = re.search(r"Date:\s*(\d{4}\.\d{2}\.\d{2})", text)
-                date_match_cti_2 = re.search(r"Date:\s*(\d{1,2}-[A-Z][a-z]{2}-\d{4})", text)
+            for pat in date_patterns:
+                match = re.search(pat, header_text)
+                if match:
+                    dt = parse_date(match.group(1))
+                    if dt:
+                        data['DATE'] = dt
+                        break
 
-                if date_match_sgs:
-                    data['DATE'] = parse_date(date_match_sgs.group(1))
-                elif date_match_cti:
-                    data['DATE'] = parse_date(date_match_cti.group(1))
-                elif date_match_cti_2:
-                    data['DATE'] = parse_date(date_match_cti_2.group(1))
-
-            # --- 提取化學物質數值 ---
-            # 策略：逐行掃描或使用 pdfplumber 的 table 提取功能
-            # 這裡使用簡化的行掃描邏輯，尋找 物質名稱 後面跟著的 "ND" 或 數字
-            lines = text.split('\n')
+            # 3. 提取化學物質數值
+            # 逐行掃描，尋找 "關鍵字 ... 數值" 的模式
+            lines = full_text.split('\n')
             for line in lines:
                 for key, keywords in KEYWORDS_MAP.items():
-                    # 只有當該項目目前還是 N.D. 時才去尋找 (避免覆蓋)
-                    # 或是如果找到具體數值，覆蓋掉 N.D.
-                    for keyword in keywords:
-                        # 簡單的正則表達式：匹配關鍵字，後續跟著 ND 或 數字
-                        # 注意：需排除單位 mg/kg 等干擾
-                        if keyword in line:
-                            # 尋找行內的數字或 N.D.
-                            # 排除掉類似 "ISO", "IEC" 之後的數字
-                            val_match = re.search(r"(N\.D\.|ND|\<.*?|\d+(?:\.\d+)?)", line.split(keyword)[-1])
-                            if val_match:
-                                val = val_match.group(1)
-                                if "N.D" in val or "ND" in val:
-                                    continue # 保持預設，或者如果已經有數字則不覆蓋
-                                elif re.match(r"^\d", val): # 如果是數字
+                    # 優化：F, Cl, Br 容易誤判，需增加邊界檢查或確保不是單字的一部分
+                    for kw in keywords:
+                        if kw in line:
+                            # 尋找行尾的數值或 N.D.
+                            # 邏輯：抓取 "N.D." 或 "ND" 或 數字 (排除年份 20xx)
+                            # Regex 說明: 
+                            # (N\.D\.|ND) -> 抓取未檢出
+                            # (\d+(?:\.\d+)?) -> 抓取數字
+                            # 排除掉前面有 "ISO" 或 "IEC" 的數字 (方法編號)
+                            if "ISO" in line or "IEC" in line or "EPA" in line:
+                                continue
+
+                            # 尋找測試結果
+                            # 這裡假設結果通常在行的後段
+                            result_match = re.search(r"(N\.D\.|ND|Negative|<[\d\.]+|\d+(?:\.\d+)?)", line.split(kw)[-1])
+                            
+                            if result_match:
+                                val_str = result_match.group(1)
+                                
+                                # 判斷是否為有效數值
+                                if re.match(r"^\d", val_str): # 是數字
                                     try:
-                                        # 簡單過濾：如果是年份或法規編號忽略
-                                        if float(val) > 2000 and "20" in val: pass 
-                                        else: data[key] = float(val)
+                                        val_num = float(val_str)
+                                        # 過濾年份 (例如 2025) 或法規編號
+                                        if val_num > 1980 and val_num < 2100 and key not in ['BR', 'CL', 'F']:
+                                            continue
+                                        
+                                        # 比較大小，保留最大值 (處理同份報告多個測試點的情況)
+                                        current_val = data[key]
+                                        if current_val == "N.D." or current_val == "Negative":
+                                            data[key] = val_num
+                                        elif isinstance(current_val, (int, float)):
+                                            if val_num > current_val:
+                                                data[key] = val_num
                                     except:
                                         pass
+                                elif "Negative" in val_str:
+                                     # Negative 視為 N.D.，除非已有數字
+                                     pass 
 
-        # --- 判斷 PFAS ---
-        # 邏輯：檢查 Test Requested 是否包含 "PFAS" 字串 [4, 5]
-        # 通常 Test Requested 位於第一頁或第二頁
-        test_requested_section = ""
-        for i in range(min(3, len(pdf.pages))): # 只看前3頁
-            test_requested_section += pdf.pages[i].extract_text()
+            # 4. 判斷 PFAS
+            # 邏輯：檢查 "Test Requested" 或 "检测要求" 區塊是否包含 "PFAS" 字串
+            # 先找到 Header 區塊
+            req_match = re.search(r"(Test Requested|检测要求|Test Conducted)([\s\S]{1,500})", header_text, re.IGNORECASE)
+            if req_match:
+                content = req_match.group(0)
+                if "PFAS" in content:
+                    data['PFAS'] = "REPORT"
+            # 若無 PFAS 字串，保持空白
+
+    except Exception as e:
+        st.error(f"解析檔案 {filename} 時發生錯誤: {str(e)}")
+        return None
         
-        # 尋找 "Test Requested" 區塊並檢查內容
-        if "Test Requested" in test_requested_section or "检测要求" in test_requested_section:
-             if "PFAS" in test_requested_section: # 嚴格匹配 PFAS 字串
-                 data['PFAS'] = "REPORT"
-             else:
-                 data['PFAS'] = "" # 沒有則留空 [5]
-
     return data
 
-def aggregate_reports(file_paths):
-    """加總多份報告的邏輯"""
-    
-    aggregated_data = {key: 0.0 for key in KEYWORDS_MAP.keys()} # 用於比較大小，初始0
-    final_display_data = {key: "N.D." for key in KEYWORDS_MAP.keys()} # 最終顯示
-    
-    max_date = datetime.min
-    max_pb_value = -1.0
-    file_with_max_pb = ""
-    pfas_status = "" # 只要有一份是 REPORT 就顯示? 這裡依照指示：個別判斷，但彙總表邏輯需統一
-    
-    # 這裡的邏輯：若多份報告Test Requested都沒PFAS，則總表空白。
-    # 若有任何一份有出現PFAS字串，邏輯上應顯示REPORT，但根據您的指示"PFAS僅需判斷報告中有檢測項目"，通常是指單一報告。
-    # 彙總邏輯：如果所有報告都沒出現 PFAS 字串，則空白。
-    
-    for f_path in file_paths:
-        data = extract_pdf_data(f_path)
-        filename = os.path.basename(f_path)
+# --- 核心函式：數據加總與彙整 ---
+def aggregate_reports(extracted_list):
+    if not extracted_list:
+        return None
+
+    # 初始化結果 Row
+    final_data = {key: "N.D." for key in KEYWORDS_MAP.keys()}
+    final_data['PFAS'] = ""
+    final_data['DATE'] = None
+    final_data['FILE NAME'] = ""
+
+    max_pb = -1.0 # 用於追蹤最大鉛含量
+    latest_date = datetime.min
+
+    for item in extracted_list:
+        fname = item['Filename']
         
-        # 1. 日期取最新 [5]
-        if data['DATE'] and data['DATE'] > max_date:
-            max_date = data['DATE']
+        # 1. 日期取最新
+        if item['DATE'] and item['DATE'] > latest_date:
+            latest_date = item['DATE']
             
-        # 2. PFAS 判斷 (聯集)
-        if data['PFAS'] == "REPORT":
-            pfas_status = "REPORT"
-            
-        # 3. 數值取最大值 (數字 > N.D.) [5]
-        # 先處理 Pb 以決定 FILE NAME
-        pb_val = data['Pb']
+        # 2. PFAS 判斷 (聯集：只要有一份是 REPORT 就顯示)
+        if item['PFAS'] == "REPORT":
+            final_data['PFAS'] = "REPORT"
+
+        # 3. 數值取最大 (數字 > N.D.)
+        # 特別處理 Pb 以決定 FILE NAME
+        pb_val = item['Pb']
         current_pb_num = 0.0
+        
         if isinstance(pb_val, (int, float)):
             current_pb_num = pb_val
         
-        if current_pb_num > max_pb_value:
-            max_pb_value = current_pb_num
-            file_with_max_pb = filename # [5] 規則1
-            
+        # 更新 Pb 最大值與對應檔名
+        if current_pb_num > max_pb:
+            max_pb = current_pb_num
+            final_data['FILE NAME'] = fname
+        elif current_pb_num == max_pb and final_data['FILE NAME'] == "":
+            final_data['FILE NAME'] = fname # 處理都是 N.D. 的情況，取第一份
+
         # 處理所有化學物質
         for key in KEYWORDS_MAP.keys():
-            val = data[key]
-            # 如果是數字
+            val = item[key]
+            # 如果新值是數字
             if isinstance(val, (int, float)):
-                # 如果當前最大值是數字，比較大小
-                if isinstance(aggregated_data[key], (int, float)):
-                    if val > aggregated_data[key]:
-                        aggregated_data[key] = val
-                        final_display_data[key] = val # 更新顯示值
+                # 如果舊值也是數字，取大者
+                if isinstance(final_data[key], (int, float)):
+                    if val > final_data[key]:
+                        final_data[key] = val
+                # 如果舊值是 N.D.，直接覆蓋
                 else:
-                    # 之前是 N.D.，現在是數字，直接覆蓋
-                    aggregated_data[key] = val
-                    final_display_data[key] = val
-            # 如果是 N.D.，且當前紀錄也是 N.D. (初始)，則保持 N.D.
-            # 如果當前已經有數字，則忽略 N.D.
+                    final_data[key] = val
+            # 如果新值是 N.D.，不動作 (保留可能的舊數字)
 
-    # 格式化日期
-    final_date_str = max_date.strftime("%Y/%m/%d") if max_date != datetime.min else ""
-    
-    # 建立最終 Row
-    row = {
-        'FILE NAME': file_with_max_pb,
-        **final_display_data,
-        'PFAS': pfas_status,
-        'DATE': final_date_str
-    }
-    
-    return row
+    # 4. 格式化日期
+    if latest_date != datetime.min:
+        final_data['DATE'] = latest_date.strftime("%Y/%m/%d")
+    else:
+        final_data['DATE'] = ""
 
-# --- 使用範例 ---
-# 假設您將檔案放在當前目錄的 'reports' 資料夾下
-# file_list = [os.path.join('reports', f) for f in os.listdir('reports') if f.endswith('.pdf')]
+    return final_data
 
-# 這裡模擬輸入檔案路徑 (請替換為您實際的檔案路徑)
-# file_list = [
-#     "1.價啣 S1000-2M.pdf", 
-#     "2.中文_Prepreg S1000-2MB.pdf", 
-#     "CTI_鍍金層.pdf", 
-#     # ... 其他報告
-# ]
+# --- Streamlit UI 主程式 ---
+uploaded_files = st.file_uploader("請上傳 PDF 測試報告 (SGS/CTI)", type="pdf", accept_multiple_files=True)
 
-# 執行彙總 (需有實際檔案才能執行)
-# result_row = aggregate_reports(file_list)
-
-# 轉換為 DataFrame 並顯示
-# df = pd.DataFrame([result_row])
-# 調整欄位順序
-# cols = ['FILE NAME', 'Pb', 'Cd', 'Hg', 'Cr6+', 'PBB', 'PBDE', 'DEHP', 'DBP', 'BBP', 'DIBP', 'F', 'CL', 'BR', 'PFOS', 'PFAS', 'DATE']
-# df = df[cols]
-# print(df)
-# df.to_excel("Summary_Report.xlsx", index=False)
-
+if uploaded_files:
+    if st.button("開始分析與彙整"):
+        all_data = []
+        progress_bar = st.progress(0)
+        
+        for idx, file in enumerate(uploaded_files):
+            # 解析
+            result = extract_pdf_data(file, file.name)
+            if result:
+                all_data.append(result)
+            progress_bar.progress((idx + 1) / len(uploaded_files))
+            
+        if all_data:
+            # 加總
+            summary_row = aggregate_reports(all_data)
+            
+            # 轉為 DataFrame
+            df = pd.DataFrame([summary_row])
+            
+            # 調整欄位順序
+            cols = ['FILE NAME', 'Pb', 'Cd', 'Hg', 'Cr6+', 'PBB', 'PBDE', 
+                    'DEHP', 'DBP', 'BBP', 'DIBP', 
+                    'F', 'CL', 'BR', 'PFOS', 'PFAS', 'DATE']
+            df = df[cols]
+            
+            st.success("彙整完成！")
+            st.dataframe(df)
+            
+            # 下載 CSV
+            csv = df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 下載 Excel/CSV 報表",
+                data=csv,
+                file_name="Summary_Report.csv",
+                mime="text/csv"
+            )
+        else:
+            st.warning("無法提取數據，請確認 PDF 格式。")
