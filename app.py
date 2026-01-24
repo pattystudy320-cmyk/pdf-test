@@ -37,9 +37,8 @@ UNIFIED_KEYWORDS_MAP = {
     r"(?i)(Bromine|溴).*\((Br|Br-)\)": "Br",
     r"(?i)(Iodine|碘).*\((I|I-)\)": "I",
     
-    # PFOS (修正版：支援逗號或and連接，例如 "PFOS, its salts" 或 "PFOS and its salts")
-    # 同時包含中文 "全氟辛烷磺酸"
-    r"(?i)(PFOS.*(salts|及其盐)|全氟辛烷磺酸|Perfluorooctane\s*Sulfonates\s*\(PFOS\))": "PFOS"
+    # PFOS (修正版：支援單獨的 PFOS acid 描述，也支援 salts，並支援中文)
+    r"(?i)(Perfluorooctane\s*sulfonic\s*acid\s*\(PFOS\)|PFOS.*(salts|及其盐)|全氟辛烷磺酸|Perfluorooctane\s*Sulfonates\s*\(PFOS\))": "PFOS"
 }
 
 # PBBs/PBDEs 加總用關鍵字 (包含中文)
@@ -90,7 +89,7 @@ def get_value_priority(val):
 # 3. 廠商專屬解析模組
 # ==========================================
 
-# --- SGS Parser (修正重點：黑名單排除法 + 鎖定結果欄) ---
+# --- SGS Parser (SGS 專屬：黑名單排除 MDL/Limit，精準抓取 Result) ---
 def parse_sgs(pdf_obj, full_text, first_page_text):
     result = {k: None for k in UNIFIED_KEYWORDS_MAP.values()}
     result['PFAS'] = ""
@@ -99,8 +98,10 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
     # 1. 日期抓取：由上往下 (Top-Down)，SGS 日期通常在右上角
     # 必須避開 "Sample Receiving Date" (接收日期)
     lines = first_page_text.split('\n')
-    for line in lines[:35]: 
+    for line in lines[:40]: 
+        # 尋找 Date 關鍵字，但排除 Received, Testing, Period
         if re.search(r"(?i)(Date|日期)", line) and not re.search(r"(?i)(Received|Receiving|Testing|Period|接收|周期)", line):
+            # 抓取日期格式 YYYY/MM/DD 或 Mon DD, YYYY
             match = re.search(r"(20\d{2}[-./年]\s?\d{1,2}[-./月]\s?\d{1,2}|[A-Za-z]{3}\s+\d{1,2}[,\s]+\d{4})", line)
             if match:
                 result['DATE'] = standardize_date(match.group(0))
@@ -117,23 +118,23 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                 header = table[0]
                 
                 # --- SGS 核心邏輯：欄位黑名單 (Blacklist) ---
-                # 排除所有絕對不是結果的欄位 (MDL, Limit, Unit, Method, CAS)
+                # 我們先找出哪些欄位「絕對不是結果」，剩下的就是結果
                 valid_col_indices = []
                 
                 for idx, col in enumerate(header):
                     col_str = str(col).strip()
-                    # 黑名單關鍵字
-                    if re.search(r"(?i)(MDL|LOQ|DL|Limit|Limit Value|限值|Unit|单位|Method|方法|CAS|Item|项目)", col_str):
-                        continue # 跳過此欄 (不要抓它!)
+                    # 黑名單關鍵字：只要標題包含這些，就絕對不是結果欄
+                    if re.search(r"(?i)(MDL|LOQ|DL|Limit|Limit Value|限值|Unit|单位|Method|方法|CAS|Item|项目|Test Requirement)", col_str):
+                        continue 
                     
-                    # 剩下的欄位可能是 Result, 结果, 或是樣品編號 (A1, 001)
+                    # 剩下的欄位可能是 Result, 结果, 或是樣品編號 (A1, 001, No.1)
                     valid_col_indices.append(idx)
                 
                 if not valid_col_indices: continue
 
                 # 決定哪一欄是結果欄 (Best Column)
-                # 策略 1: 找標題有 "Result" 或 "结果" 的
-                # 策略 2: 如果沒有，就取 valid_col_indices 的最後一個 (通常結果欄在最右邊)
+                # 策略: 從有效的欄位中，優先找標題有 "Result" 或 "结果" 的
+                # 如果都沒有，則取 valid_col_indices 的「最後一個」 (通常 SGS 報告結果欄在最右邊)
                 best_col_idx = valid_col_indices[-1] 
                 
                 for idx in valid_col_indices:
@@ -147,7 +148,7 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                     
                     row_str = " ".join([str(c) for c in row if c]).replace("\n", " ")
                     
-                    # PFOA 排除 (SGS 有時會把 PFOA 寫在 PFOS 旁邊)
+                    # PFOA 排除 (避免誤抓 PFOA 當作 PFOS)
                     if re.search(r"(?i)(PFOA|Perfluorooctanoic\s*Acid|全氟辛酸)", row_str):
                         continue
 
@@ -184,13 +185,13 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
     result["PBDEs"] = pbde_sum if pbde_found and pbde_sum > 0 else "N.D."
     return result
 
-# --- CTI Parser (保留上一版修正：倒敘日期 + 防呆) ---
+# --- CTI Parser (CTI 專屬：倒敘日期 + 樣品編號跳過) ---
 def parse_cti(pdf_obj, full_text, first_page_text):
     result = {k: None for k in UNIFIED_KEYWORDS_MAP.values()}
     result['PFAS'] = ""
     result['DATE'] = ""
     
-    # 1. 日期抓取：倒敘搜尋法 (Bottom-Up)
+    # 1. 日期抓取：倒敘搜尋法 (Bottom-Up)，CTI 日期在右下角
     lines = first_page_text.split('\n')
     date_pat = re.compile(r"(20\d{2}[\.\-/]\d{2}[\.\-/]\d{2}|[A-Za-z]{3}\.?\s+\d{1,2},?\s+20\d{2})")
     
@@ -211,13 +212,14 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                 if not table: continue
                 header = table[0]
                 
-                # 找 Result 欄位
+                # CTI 必須找 Result/结果 欄位
                 res_idx = -1
                 for i, col in enumerate(header):
                     if col and re.search(r"(?i)(Result|结果)", str(col)):
                         res_idx = i
                         break
                 
+                # 如果找不到 Result，找 MDL 旁邊
                 if res_idx == -1:
                     for i, col in enumerate(header):
                         if col and re.search(r"(?i)(MDL|LOQ|RL|Limit)", str(col)):
@@ -234,11 +236,13 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                     if re.search(r"(?i)(PFOA|Perfluorooctanoic\s*Acid|全氟辛酸)", row_str):
                         continue
 
-                    # CTI 防呆：跳過樣品編號 (如 001, 026)
+                    # CTI 防呆：跳過樣品編號行 (如 "001", "026")
                     raw_val = str(row[res_idx]).strip()
                     val = clean_value(raw_val)
                     
+                    # 如果抓到的是純數字且不含小數點，且看起來像是編號
                     if re.search(r"^0\d+$", raw_val) or (re.search(r"^\d{1,3}$", raw_val) and "mg/kg" not in raw_val):
+                        # 嘗試往下一行抓取
                         if row_idx + 1 < len(table[1:]):
                             next_row = table[1:][row_idx+1]
                             if len(next_row) > res_idx:
@@ -392,14 +396,14 @@ def aggregate_reports(valid_results):
 # ==========================================
 
 def main():
-    st.set_page_config(page_title="化學報告自動彙整系統 v4.1 (SGS Perfected)", layout="wide")
-    st.title("🧪 化學測試報告自動彙整系統 v4.1 (SGS Perfected)")
+    st.set_page_config(page_title="化學報告自動彙整系統 v4.2 (Final)", layout="wide")
+    st.title("🧪 化學測試報告自動彙整系統 v4.2 (SGS & CTI Optimized)")
     st.markdown("""
-    **功能更新：**
-    1. **SGS 數據抓取修正**：採用「黑名單」機制排除 MDL/Limit，精準鎖定 Result 欄位。
-    2. **SGS 日期抓取修正**：採用 Top-Down 策略並避開 Received Date。
-    3. **PFOS 抓取修正**：放寬正則邏輯，支援逗號連接 (PFOS, its salts) 與中文。
-    4. **CTI 邏輯保留**：完全保留 CTI 的倒敘日期與樣品編號跳過機制。
+    **版本更新重點：**
+    1. **SGS 數據抓取優化**：透過黑名單排除 MDL/Limit 欄位，精準鎖定結果欄 (A1/001)，徹底解決抓錯值問題。
+    2. **SGS 日期修正**：由上往下搜尋，避開接收日期，鎖定報告發行日。
+    3. **PFOS 邏輯增強**：支援 `PFOS acid`、`PFOS salts` 等多種寫法，且嚴格排除 PFOA。
+    4. **完整 CTI 支援**：保留 CTI 倒敘日期與表格防呆邏輯。
     """)
 
     uploaded_files = st.file_uploader("請上傳 PDF 報告 (支援多檔)", type="pdf", accept_multiple_files=True)
@@ -441,7 +445,7 @@ def main():
                     elif vendor == "INTERTEK":
                         data = parse_intertek(file, full_text, first_page_text)
                     else:
-                        # 嘗試當作 SGS 處理 (針對亂碼檔名但內容是SGS的情況)
+                        # 嘗試當作 SGS 處理 (針對檔名亂碼但內容是 SGS 的情況)
                         if "SGS" in first_page_text:
                             data = parse_sgs(file, full_text, first_page_text)
                         else:
