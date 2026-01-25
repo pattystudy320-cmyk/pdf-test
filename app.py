@@ -6,7 +6,7 @@ import io
 from dateutil import parser
 
 # ==========================================
-# 0. 強制清除快取 (解決結果卡住問題)
+# 0. 強制清除快取 (最優先執行)
 # ==========================================
 try:
     if hasattr(st, 'cache_data'):
@@ -22,7 +22,6 @@ except:
 # 1. 全局配置
 # ==========================================
 
-# 最終輸出欄位
 TARGET_ITEMS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBBs", "PBDEs",
     "DEHP", "DBP", "BBP", "DIBP",
@@ -30,8 +29,7 @@ TARGET_ITEMS = [
     "PFOS", "PFAS", "DATE", "FILENAME"
 ]
 
-# --- SGS 專用終極字典 (v5.0) ---
-# 包含繁體/簡體中文、英文全名、化學符號縮寫
+# --- SGS 專用終極字典 (v5.1) ---
 SGS_OPTIMIZED_MAP = {
     'Pb': ['Lead', 'Pb', '鉛', '铅'],
     'Cd': ['Cadmium', 'Cd', '鎘', '镉'],
@@ -71,7 +69,7 @@ UNIFIED_REGEX_MAP = {
 PBB_SUBITEMS = r"(?i)(Monobromobiphenyl|Dibromobiphenyl|Tribromobiphenyl|Tetrabromobiphenyl|Pentabromobiphenyl|Hexabromobiphenyl|Heptabromobiphenyl|Octabromobiphenyl|Nonabromobiphenyl|Decabromobiphenyl|一溴联苯|二溴联苯|三溴联苯|四溴联苯|五溴联苯|六溴联苯|七溴联苯|八溴联苯|九溴联苯|十溴联苯)"
 PBDE_SUBITEMS = r"(?i)(Monobromodiphenyl ether|Dibromodiphenyl ether|Tribromodiphenyl ether|Tetrabromodiphenyl ether|Pentabromodiphenyl ether|Hexabromodiphenyl ether|Heptabromodiphenyl ether|Octabromodiphenyl ether|Nonabromodiphenyl ether|Decabromodiphenyl ether|一溴二苯醚|二溴二苯醚|三溴二苯醚|四溴二苯醚|五溴二苯醚|六溴二苯醚|七溴二苯醚|八溴二苯醚|九溴二苯醚|十溴二苯醚)"
 
-# --- SGS 專用：嚴格黑名單 ---
+# --- SGS 專用：嚴格黑名單 (必須完全過濾這些數字) ---
 SGS_IGNORE_LIST = ['2', '5', '8', '10', '50', '100', '1000']
 
 # 英文月份對照表
@@ -110,9 +108,7 @@ def clean_value(val_str):
     if not val_str: return None
     val_str = str(val_str).strip()
     
-    # 排除 CAS No.
     if re.search(r"\b\d{2,}-\d{2,}-\d{2,}\b", val_str): return None 
-    # 排除過長非結果字串
     if len(val_str) > 20 and not re.search(r"(negative|positive|n\.d\.)", val_str, re.I): return None
 
     if re.search(r"(?i)(n\.?d\.?|not detected|<)", val_str): return "N.D."
@@ -130,7 +126,7 @@ def get_value_priority(val):
     return (0, 0)
 
 # ==========================================
-# 3. SGS 解析模組 (v5.0 架構)
+# 3. SGS 解析模組 (v5.1 直球對決版)
 # ==========================================
 
 def parse_sgs(pdf_obj, full_text, first_page_text):
@@ -138,23 +134,25 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
     result['PFAS'] = ""
     result['DATE'] = ""
 
-    # --- 1. 日期鎖定器 (Date Locker) ---
+    # --- 1. 日期抓取 (Direct Regex Capture) ---
+    # 不切冒號，直接抓 Date: 後面的日期格式
     lines = first_page_text.split('\n')
     for line in lines[:20]: # 只看前 20 行
         # 尋找 Date 關鍵字，且排除 Received/Testing
-        if re.search(r"(?i)(Date|日期)\s*[:：]", line) and not re.search(r"(?i)(Received|Receiving|Testing|Period|接收|周期)", line):
-            try:
-                # 使用切割法，丟棄前面的編號，只取日期部分
-                parts = re.split(r"(?i)(Date|日期)\s*[:：]", line, 1)
-                if len(parts) > 2:
-                    date_content = parts[-1].strip()
-                    result['DATE'] = clean_date_str(date_content)
-                    if result['DATE'] != "1900/01/01":
-                        break
-            except:
-                continue
+        if re.search(r"(?i)(Date|日期)", line) and not re.search(r"(?i)(Received|Receiving|Testing|Period|接收|周期)", line):
+            # 優先抓取：英文月份格式 (Feb 27, 2025)
+            match_en = re.search(r"(?i)(?:Date|日期)\s*[:：]?\s*([A-Za-z]{3}\s+\d{1,2},?\s*\d{4})", line)
+            if match_en:
+                result['DATE'] = clean_date_str(match_en.group(1))
+                break
+            
+            # 備用抓取：數字格式 (2025/02/27)
+            match_num = re.search(r"(?:Date|日期)\s*[:：]?\s*(\d{4}[-./年]\s?\d{1,2}[-./月]\s?\d{1,2})", line)
+            if match_num:
+                result['DATE'] = clean_date_str(match_num.group(1))
+                break
     
-    # --- 2. 行掃描與數值抓取 ---
+    # --- 2. 數據抓取 ---
     pbb_sum = 0; pbde_sum = 0; pbb_found = False; pbde_found = False
     
     with pdfplumber.open(pdf_obj) as pdf:
@@ -177,52 +175,50 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                     # A. 識別測項 (使用 SGS 終極字典)
                     matched_key = None
                     for key, keywords in SGS_OPTIMIZED_MAP.items():
-                        # 檢查是否包含任一關鍵字 (不分大小寫)
                         if any(kw.lower() in row_str.lower() for kw in keywords):
-                            
-                            # 防呆規則
                             if key == "PFOS" and re.search(r"(?i)(Total|PFOSF|Derivative|总和|衍生物)", row_str):
                                 continue
-                            # 鹵素防呆: 必須看到 (F), (Cl) 等符號
                             if key in ['F', 'Cl', 'Br', 'I'] and not re.search(r"\((F|Cl|Br|I)-?\)", row_str):
                                 continue
-                                
                             matched_key = key
                             break
                     
-                    # 檢查加總項目
                     is_pbb = re.search(PBB_SUBITEMS, row_str)
                     is_pbde = re.search(PBDE_SUBITEMS, row_str)
 
                     if not matched_key and not is_pbb and not is_pbde:
                         continue 
 
-                    # B. 數值抓取器 (Value Extractor)
+                    # B. 數值抓取器 (Strict Filter)
                     # 抓出所有潛在數值 (含 ND)
                     value_candidates = re.findall(r"(?i)(N\.?D\.?|Negative|Positive|<\s*\d+\.?\d*|\b\d+\.?\d*\b)", row_str)
                     found_val = None
                     
-                    # 右向左掃描
+                    # 由右向左掃描 (Reversed Search)
                     for raw_val in reversed(value_candidates):
-                        # 1. 單位剝離與字串清洗
-                        check_str = raw_val.strip()
-                        if "<" in check_str: check_str = check_str.replace("<", "").strip()
-                        # 移除 mg/kg 等單位干擾 (只留數字)
-                        check_str = re.split(r"[a-zA-Z]", check_str)[0] 
                         
-                        # 2. 嚴格黑名單比對 (String Match)
-                        if check_str in SGS_IGNORE_LIST:
-                            continue 
+                        # --- 核心邏輯：先剝皮，再比對 ---
+                        # 1. 剝離單位與符號 (只留數字)
+                        # e.g., "1000mg/kg" -> "1000", "<2" -> "2"
+                        clean_num_str = re.sub(r"[^0-9.]", "", raw_val)
                         
-                        # 3. 數值轉換驗證
+                        # 2. 如果是數字，檢查是否在嚴格黑名單中
+                        if clean_num_str in SGS_IGNORE_LIST:
+                            continue # 是黑名單，跳過 (Reject)
+                        
+                        # 3. 雙重確認：如果是浮點數轉整數後是否在黑名單 (如 1000.0)
+                        try:
+                            num = float(clean_num_str)
+                            if int(num) == num and str(int(num)) in SGS_IGNORE_LIST:
+                                continue # 是黑名單，跳過
+                        except:
+                            pass # 不是數字 (可能是 ND)，繼續往下處理
+
+                        # 4. 通過黑名單，進行標準化清洗
                         cleaned = clean_value(raw_val)
                         if cleaned is None: continue
-                        
-                        # 4. 二次防呆 (防止 1000.0)
-                        if isinstance(cleaned, (int, float)):
-                            if int(cleaned) == cleaned and str(int(cleaned)) in SGS_IGNORE_LIST:
-                                continue
 
+                        # 5. 鎖定結果 (Accept)
                         found_val = cleaned
                         break 
                     
@@ -248,7 +244,7 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
     return result
 
 # ==========================================
-# 4. CTI/Intertek 解析模組 (完全獨立)
+# 4. CTI/Intertek 解析模組 (Regex版 - 完全獨立)
 # ==========================================
 
 def parse_cti(pdf_obj, full_text, first_page_text):
@@ -412,14 +408,13 @@ def aggregate_reports(valid_results):
     return pd.DataFrame([final_row])
 
 def main():
-    st.set_page_config(page_title="化學報告自動彙整系統 v5.0 (SGS Ultimate)", layout="wide")
-    st.title("🧪 化學測試報告自動彙整系統 v5.0 (SGS Ultimate)")
+    st.set_page_config(page_title="化學報告自動彙整系統 v5.1 (Direct Regex)", layout="wide")
+    st.title("🧪 化學測試報告自動彙整系統 v5.1 (Direct Regex)")
     st.markdown("""
-    **SGS 專屬終極架構 (v5.0)：**
-    1. **終極字典**：包含繁/簡中文與特殊縮寫，確保八份報告皆能命中。
-    2. **嚴格黑名單**：絕對過濾 `1000, 100, 50, 10, 8, 5, 2`，並執行單位剝離。
-    3. **日期精準切割**：使用 `Date:` 作為錨點，不再抓錯編號。
-    4. **廠商隔離**：SGS 邏輯完全獨立，CTI/Intertek 保持不變。
+    **SGS 專屬修正 (直球對決版)：**
+    1. **日期直取**：不切冒號，直接用 Regex 抓取 `Date` 後面的日期。
+    2. **數值剝皮**：先移除單位 (mg/kg) 與符號，再比對黑名單。
+    3. **嚴格過濾**：完整還原您的 `is_valid_result` 黑名單邏輯。
     """)
 
     uploaded_files = st.file_uploader("請上傳 PDF 報告 (支援多檔)", type="pdf", accept_multiple_files=True)
