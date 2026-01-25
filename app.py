@@ -6,9 +6,18 @@ import io
 from dateutil import parser
 
 # ==========================================
-# 0. 強制清除快取 (解決結果卡住問題)
+# 0. 安全清除快取 (相容性修正)
 # ==========================================
-st.cache_data.clear()
+try:
+    # 嘗試使用新版指令
+    if hasattr(st, 'cache_data'):
+        st.cache_data.clear()
+    elif hasattr(st, 'experimental_memo'):
+        st.experimental_memo.clear()
+    elif hasattr(st, 'cache'):
+        st.cache_resource.clear()
+except:
+    pass # 如果都失敗，就不勉強清除，避免報錯
 
 # ==========================================
 # 1. 全局配置
@@ -22,8 +31,7 @@ TARGET_ITEMS = [
     "PFOS", "PFAS", "DATE", "FILENAME"
 ]
 
-# --- SGS 專用優化字典 (基於您提供的 SGS.txt) ---
-# 包含中文(繁/簡)與英文關鍵字
+# --- SGS 專用優化字典 (基於您提供的優化列表) ---
 SGS_OPTIMIZED_MAP = {
     'Pb': ['Lead', 'Pb', '鉛', '铅'],
     'Cd': ['Cadmium', 'Cd', '鎘', '镉'],
@@ -40,11 +48,10 @@ SGS_OPTIMIZED_MAP = {
     'Br': ['Bromine', '溴'],
     'I': ['Iodine', '碘'],
     'PFOS': ['Perfluorooctane sulfonic acid', 'PFOS', '全氟辛烷磺酸', 'Perfluorooctane Sulfonates'],
-    # PFAS 標記用
     'PFAS': ['PFAS'] 
 }
 
-# --- CTI/Intertek 通用字典 (Regex版，維持原樣) ---
+# --- CTI/Intertek 通用字典 (Regex版) ---
 UNIFIED_REGEX_MAP = {
     r"(?i)\b(Lead|Pb|铅)\b": "Pb",
     r"(?i)\b(Cadmium|Cd|镉)\b": "Cd",
@@ -60,12 +67,10 @@ UNIFIED_REGEX_MAP = {
     r"(?i)(Iodine|碘).*\((I|I-)\)": "I",
     r"(?i)(Perfluorooctane\s*sulfonic\s*acid\s*\(PFOS\)|PFOS.*(salts|及其盐)|全氟辛烷磺酸)": "PFOS"
 }
-# PBBs/PBDEs 加總 Regex
 PBB_SUBITEMS = r"(?i)(Monobromobiphenyl|Dibromobiphenyl|Tribromobiphenyl|Tetrabromobiphenyl|Pentabromobiphenyl|Hexabromobiphenyl|Heptabromobiphenyl|Octabromobiphenyl|Nonabromobiphenyl|Decabromobiphenyl|一溴联苯|二溴联苯|三溴联苯|四溴联苯|五溴联苯|六溴联苯|七溴联苯|八溴联苯|九溴联苯|十溴联苯)"
 PBDE_SUBITEMS = r"(?i)(Monobromodiphenyl ether|Dibromodiphenyl ether|Tribromodiphenyl ether|Tetrabromodiphenyl ether|Pentabromodiphenyl ether|Hexabromodiphenyl ether|Heptabromodiphenyl ether|Octabromodiphenyl ether|Nonabromodiphenyl ether|Decabromodiphenyl ether|一溴二苯醚|二溴二苯醚|三溴二苯醚|四溴二苯醚|五溴二苯醚|六溴二苯醚|七溴二苯醚|八溴二苯醚|九溴二苯醚|十溴二苯醚)"
 
 # --- SGS 專用：完整黑名單 (字串比對用) ---
-# 包含常見的 Limit (1000, 100) 與 MDL (2, 5, 8, 10, 50)
 SGS_IGNORE_LIST = ['2', '5', '8', '10', '50', '100', '1000']
 
 # 英文月份對照表
@@ -81,19 +86,16 @@ MONTH_MAP = {
 # ==========================================
 
 def clean_date_str(date_str):
-    """清洗日期字串，支援英文月份"""
     if not date_str: return "1900/01/01"
     clean_str = str(date_str).strip()
     
-    # 英文月份轉換
     for mon, digit in MONTH_MAP.items():
         if mon in clean_str:
             clean_str = clean_str.replace(mon, digit)
             break
             
-    # 去除中文年/月/日，改為斜線
     clean_str = clean_str.replace("年", "/").replace("月", "/").replace("日", "")
-    # 移除多餘符號 (如 Page 1 of 16)
+    # 移除 Page 1 of 16 這類的干擾
     clean_str = re.split(r"(Page|頁)", clean_str, flags=re.IGNORECASE)[0]
     
     try:
@@ -103,13 +105,10 @@ def clean_date_str(date_str):
         return "1900/01/01"
 
 def clean_value(val_str):
-    """數據清洗"""
     if not val_str: return None
     val_str = str(val_str).strip()
     
-    # 排除 CAS No.
     if re.search(r"\b\d{2,}-\d{2,}-\d{2,}\b", val_str): return None 
-    # 排除過長非結果字串
     if len(val_str) > 20 and not re.search(r"(negative|positive|n\.d\.)", val_str, re.I): return None
 
     if re.search(r"(?i)(n\.?d\.?|not detected|<)", val_str): return "N.D."
@@ -127,28 +126,28 @@ def get_value_priority(val):
     return (0, 0)
 
 # ==========================================
-# 3. SGS 解析模組 (重構版)
+# 3. SGS 解析模組
 # ==========================================
 
 def parse_sgs(pdf_obj, full_text, first_page_text):
-    # 初始化結果字典
     result = {k: None for k in SGS_OPTIMIZED_MAP.keys()}
     result['PFAS'] = ""
     result['DATE'] = ""
 
-    # --- 1. 日期抓取 (絕對位置鎖定) ---
-    # 只看前 10 行，只找 'Date:'，直接解析
+    # 1. 日期抓取 (鎖定前 15 行 + Date關鍵字)
     lines = first_page_text.split('\n')
     for line in lines[:15]: 
-        # 尋找 Date 關鍵字，嚴格排除 Received, Testing, Period
         if re.search(r"(?i)(Date|日期)\s*[:：]", line) and not re.search(r"(?i)(Received|Receiving|Testing|Period|接收|周期)", line):
-            # 提取冒號後的內容
-            date_content = re.split(r"[:：]", line, 1)[1].strip()
-            result['DATE'] = clean_date_str(date_content)
-            if result['DATE'] != "1900/01/01":
-                break
+            try:
+                # 嘗試切割出日期部分
+                date_content = re.split(r"[:：]", line, 1)[1].strip()
+                result['DATE'] = clean_date_str(date_content)
+                if result['DATE'] != "1900/01/01":
+                    break
+            except:
+                continue
     
-    # --- 2. 數據抓取 (使用優化字典 + 黑名單字串比對) ---
+    # 2. 數據抓取
     pbb_sum = 0; pbde_sum = 0; pbb_found = False; pbde_found = False
     
     with pdfplumber.open(pdf_obj) as pdf:
@@ -158,68 +157,53 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                 if not table: continue
                 
                 for row in table: 
-                    # 轉為字串方便比對
                     row_str = " ".join([str(c) for c in row if c]).replace("\n", " ")
                     
-                    # PFOA 排除
                     if re.search(r"(?i)(PFOA|Perfluorooctanoic\s*Acid|全氟辛酸)", row_str):
                         continue
 
                     if "PFAS" in row_str and not result['PFAS']:
                         result['PFAS'] = "REPORT"
 
-                    # A. 識別測項 (使用 SGS 優化字典)
                     matched_key = None
+                    # 使用 SGS 專用字典
                     for key, keywords in SGS_OPTIMIZED_MAP.items():
-                        # 檢查該行是否包含任一關鍵字
                         if any(kw.lower() in row_str.lower() for kw in keywords):
-                            # PFOS 特殊防呆 (避免抓到 derivatives 標題)
                             if key == "PFOS" and re.search(r"(?i)(Total|PFOSF|Derivative|总和|衍生物)", row_str):
                                 continue
-                            # 鹵素特殊防呆 (避免 Fluorine 抓到 Halogen - Fluorine 標題)
                             if key in ['F', 'Cl', 'Br', 'I'] and not re.search(r"\((F|Cl|Br|I)-?\)", row_str):
-                                # 若沒有 (F) (Cl) 等符號，可能是標題行，跳過
                                 continue
-                                
                             matched_key = key
                             break
                     
-                    # 如果沒對應到 SGS 字典，檢查是否為 PBB/PBDE 細項 (用於加總)
                     is_pbb = re.search(PBB_SUBITEMS, row_str)
                     is_pbde = re.search(PBDE_SUBITEMS, row_str)
 
                     if not matched_key and not is_pbb and not is_pbde:
                         continue 
 
-                    # B. 抓取數值 (右向左 + 黑名單字串比對)
-                    # 抓出所有潛在數值
                     value_candidates = re.findall(r"(?i)(N\.?D\.?|Negative|Positive|<\s*\d+\.?\d*|\b\d+\.?\d*\b)", row_str)
-                    
                     found_val = None
                     
                     for raw_val in reversed(value_candidates):
-                        # 字串比對黑名單
                         check_str = raw_val.strip()
                         if "<" in check_str: check_str = check_str.replace("<", "").strip()
                         
-                        # 核心邏輯：如果字串在忽略清單中，直接跳過
+                        # 完整黑名單字串比對
                         if check_str in SGS_IGNORE_LIST:
                             continue 
                         
-                        # 通過黑名單，進行清洗
                         cleaned = clean_value(raw_val)
                         if cleaned is None: continue
                         
-                        # 二次防呆：防止 '1000.0' 這種漏網之魚
+                        # 數值防呆
                         if isinstance(cleaned, (int, float)):
                             if int(cleaned) == cleaned and str(int(cleaned)) in SGS_IGNORE_LIST:
                                 continue
 
-                        # 找到有效值
                         found_val = cleaned
                         break 
                     
-                    # C. 填入結果
                     if found_val is not None:
                         if matched_key:
                             current_val = result[matched_key]
@@ -241,15 +225,14 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
     return result
 
 # ==========================================
-# 4. CTI/Intertek 解析模組 (Regex版 - 維持原樣)
+# 4. CTI/Intertek 解析模組
 # ==========================================
 
 def parse_cti(pdf_obj, full_text, first_page_text):
-    result = {k: None for k in TARGET_ITEMS if k not in ['FILENAME', 'DATE']} # 簡化初始化
+    result = {k: None for k in TARGET_ITEMS if k not in ['FILENAME', 'DATE']}
     result['PFAS'] = ""
     result['DATE'] = ""
     
-    # Bottom-Up 日期
     lines = first_page_text.split('\n')
     date_pat = re.compile(r"(20\d{2}[\.\-/]\d{2}[\.\-/]\d{2}|[A-Za-z]{3}\.?\s+\d{1,2},?\s+20\d{2})")
     for line in reversed(lines):
@@ -290,7 +273,7 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                     
                     if "PFAS" in row_str and not result.get('PFAS'): result['PFAS'] = "REPORT"
 
-                    for pat, key in UNIFIED_REGEX_MAP.items(): # 使用 Regex 字典
+                    for pat, key in UNIFIED_REGEX_MAP.items():
                         if re.search(pat, row_str):
                             if key == "PFOS" and re.search(r"(?i)(Total|PFOSF|Derivative|总和|衍生物)", row_str): continue
                             if val is not None:
@@ -406,14 +389,12 @@ def aggregate_reports(valid_results):
     return pd.DataFrame([final_row])
 
 def main():
-    st.set_page_config(page_title="化學報告自動彙整系統 v4.7 (SGS Optimized)", layout="wide")
-    st.title("🧪 化學測試報告自動彙整系統 v4.7 (SGS Optimized)")
+    st.set_page_config(page_title="化學報告自動彙整系統 v4.8 (Safe Fix)", layout="wide")
+    st.title("🧪 化學測試報告自動彙整系統 v4.8 (Safe Fix)")
     st.markdown("""
-    **SGS 專屬修正 (基於用戶優化列表)：**
-    1. **字典重構**：採用用戶提供的 `SGS Optimization Map`，包含中英文關鍵字。
-    2. **完整黑名單**：恢復 `1000, 100, 50, 10, 8, 5, 2` 過濾，採用字串直比。
-    3. **日期鎖定**：鎖定前 15 行的 `Date:`，直接解析，避免抓錯。
-    4. **強制重置**：每次執行自動清除快取，防止結果卡住。
+    **SGS 專屬修正：**
+    1. **錯誤修復**：修正舊版 Streamlit 造成的快取錯誤 (AttributeError)。
+    2. **邏輯保留**：完整保留您要求的優化字典與黑名單邏輯。
     """)
 
     uploaded_files = st.file_uploader("請上傳 PDF 報告 (支援多檔)", type="pdf", accept_multiple_files=True)
@@ -462,4 +443,47 @@ def main():
                             continue
 
                     if data:
-                        data["
+                        data["FILENAME"] = file.name
+                        valid_results.append(data)
+                    else:
+                        bucket_error.append(f"{file.name} (解析失敗)")
+
+                except Exception as e:
+                    bucket_error.append(f"{file.name} (錯誤: {str(e)})")
+                
+                progress_bar.progress((i + 1) / len(uploaded_files))
+
+            status_text.text("分析完成！")
+
+            if valid_results:
+                df_final = aggregate_reports(valid_results)
+                cols = ["FILENAME", "DATE"] + [c for c in TARGET_ITEMS if c not in ["FILENAME", "DATE"]]
+                df_final = df_final[cols]
+                
+                st.success(f"✅ 成功處理 {len(valid_results)} 份報告：")
+                st.dataframe(df_final)
+                
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df_final.to_excel(writer, index=False, sheet_name='Summary')
+                output.seek(0)
+                
+                st.download_button(
+                    label="📥 下載 Excel",
+                    data=output,
+                    file_name=f"Merged_Report_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                st.warning("未提取到有效數據。")
+
+            if bucket_unknown or bucket_error:
+                st.divider()
+                st.subheader("⚠️ 異常報告")
+                if bucket_unknown:
+                    for name in bucket_unknown: st.write(f"- 🟡 未識別: {name}")
+                if bucket_error:
+                    for name in bucket_error: st.write(f"- 🔴 錯誤: {name}")
+
+if __name__ == "__main__":
+    main()
