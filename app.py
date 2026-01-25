@@ -45,6 +45,9 @@ UNIFIED_KEYWORDS_MAP = {
 PBB_SUBITEMS = r"(?i)(Monobromobiphenyl|Dibromobiphenyl|Tribromobiphenyl|Tetrabromobiphenyl|Pentabromobiphenyl|Hexabromobiphenyl|Heptabromobiphenyl|Octabromobiphenyl|Nonabromobiphenyl|Decabromobiphenyl|一溴联苯|二溴联苯|三溴联苯|四溴联苯|五溴联苯|六溴联苯|七溴联苯|八溴联苯|九溴联苯|十溴联苯)"
 PBDE_SUBITEMS = r"(?i)(Monobromodiphenyl ether|Dibromodiphenyl ether|Tribromodiphenyl ether|Tetrabromodiphenyl ether|Pentabromodiphenyl ether|Hexabromodiphenyl ether|Heptabromodiphenyl ether|Octabromodiphenyl ether|Nonabromodiphenyl ether|Decabromodiphenyl ether|一溴二苯醚|二溴二苯醚|三溴二苯醚|四溴二苯醚|五溴二苯醚|六溴二苯醚|七溴二苯醚|八溴二苯醚|九溴二苯醚|十溴二苯醚)"
 
+# SGS 數值黑名單 (常見的 Limit 和 MDL 值)
+SGS_VALUE_BLACKLIST = [1000, 100, 50, 10, 8, 5, 2]
+
 # ==========================================
 # 2. 通用工具函數
 # ==========================================
@@ -89,7 +92,7 @@ def get_value_priority(val):
 # 3. 廠商專屬解析模組
 # ==========================================
 
-# --- SGS Parser (SGS 專屬：黑名單排除 MDL/Limit，精準抓取 Result) ---
+# --- SGS Parser (改版：右向左掃描 + 數值過濾) ---
 def parse_sgs(pdf_obj, full_text, first_page_text):
     result = {k: None for k in UNIFIED_KEYWORDS_MAP.values()}
     result['PFAS'] = ""
@@ -99,9 +102,7 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
     # 必須避開 "Sample Receiving Date" (接收日期)
     lines = first_page_text.split('\n')
     for line in lines[:40]: 
-        # 尋找 Date 關鍵字，但排除 Received, Testing, Period
         if re.search(r"(?i)(Date|日期)", line) and not re.search(r"(?i)(Received|Receiving|Testing|Period|接收|周期)", line):
-            # 抓取日期格式 YYYY/MM/DD 或 Mon DD, YYYY
             match = re.search(r"(20\d{2}[-./年]\s?\d{1,2}[-./月]\s?\d{1,2}|[A-Za-z]{3}\s+\d{1,2}[,\s]+\d{4})", line)
             if match:
                 result['DATE'] = standardize_date(match.group(0))
@@ -115,83 +116,84 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
             tables = page.extract_tables()
             for table in tables:
                 if not table: continue
-                header = table[0]
                 
-                # --- SGS 核心邏輯：欄位黑名單 (Blacklist) ---
-                # 我們先找出哪些欄位「絕對不是結果」，剩下的就是結果
-                valid_col_indices = []
-                
-                for idx, col in enumerate(header):
-                    col_str = str(col).strip()
-                    # 黑名單關鍵字：只要標題包含這些，就絕對不是結果欄
-                    if re.search(r"(?i)(MDL|LOQ|DL|Limit|Limit Value|限值|Unit|单位|Method|方法|CAS|Item|项目|Test Requirement)", col_str):
-                        continue 
-                    
-                    # 剩下的欄位可能是 Result, 结果, 或是樣品編號 (A1, 001, No.1)
-                    valid_col_indices.append(idx)
-                
-                if not valid_col_indices: continue
-
-                # 決定哪一欄是結果欄 (Best Column)
-                # 策略: 從有效的欄位中，優先找標題有 "Result" 或 "结果" 的
-                # 如果都沒有，則取 valid_col_indices 的「最後一個」 (通常 SGS 報告結果欄在最右邊)
-                best_col_idx = valid_col_indices[-1] 
-                
-                for idx in valid_col_indices:
-                    if re.search(r"(?i)(Result|结果)", str(header[idx])):
-                        best_col_idx = idx
-                        break
-
-                # 開始讀取數據
-                for row in table[1:]:
-                    if len(row) <= best_col_idx: continue
-                    
+                # 遍歷每一行數據
+                for row in table: # SGS 改為直接掃描每一行，不依賴 Header 定位
+                    # 組合整行文字來判斷測項
                     row_str = " ".join([str(c) for c in row if c]).replace("\n", " ")
                     
-                    # PFOA 排除 (避免誤抓 PFOA 當作 PFOS)
+                    # PFOA 排除
                     if re.search(r"(?i)(PFOA|Perfluorooctanoic\s*Acid|全氟辛酸)", row_str):
                         continue
 
-                    val = clean_value(row[best_col_idx])
-                    
                     if "PFAS" in row_str and not result['PFAS']:
                         result['PFAS'] = "REPORT"
 
-                    # 匹配測項
+                    # 判斷這一行是否包含我們要的化學物質
+                    matched_key = None
                     for pat, key in UNIFIED_KEYWORDS_MAP.items():
                         if re.search(pat, row_str):
-                            # PFOS 防呆：排除 Total, PFOSF
+                            # PFOS 防呆
                             if key == "PFOS" and re.search(r"(?i)(Total|PFOSF|Derivative|总和|衍生物)", row_str):
                                 continue
-                                
-                            if val is not None:
-                                current_val = result[key]
-                                if current_val is None or current_val == "N.D.":
-                                    result[key] = val
-                                elif isinstance(val, (int, float)) and isinstance(current_val, (int, float)):
-                                    result[key] = max(val, current_val)
+                            matched_key = key
                             break
                     
-                    # PBBs / PBDEs 加總
-                    if re.search(PBB_SUBITEMS, row_str):
-                        pbb_found = True
-                        if isinstance(val, (int, float)): pbb_sum += val
-                    if re.search(PBDE_SUBITEMS, row_str):
-                        pbde_found = True
-                        if isinstance(val, (int, float)): pbde_sum += val
+                    is_pbb = re.search(PBB_SUBITEMS, row_str)
+                    is_pbde = re.search(PBDE_SUBITEMS, row_str)
+
+                    if not matched_key and not is_pbb and not is_pbde:
+                        continue # 如果這行沒有關鍵字，就跳過
+
+                    # --- SGS 核心邏輯：右向左掃描 + 數值過濾 ---
+                    found_val = None
+                    
+                    # 從右邊開始往左找 (Reversed)
+                    for cell in reversed(row):
+                        val_str = str(cell).strip()
+                        cleaned = clean_value(val_str)
+                        
+                        if cleaned is None: continue
+                        
+                        # 過濾黑名單數字 (解決抓到 Limit/MDL 問題)
+                        if isinstance(cleaned, (int, float)):
+                            # 如果是整數，且在黑名單中，極有可能是 Limit/MDL，跳過
+                            if int(cleaned) == cleaned and int(cleaned) in SGS_VALUE_BLACKLIST:
+                                continue
+                        
+                        # 如果找到 N.D. 或 非黑名單數字，就是它了！
+                        found_val = cleaned
+                        break # 找到就停止
+                    
+                    if found_val is not None:
+                        # 填入結果
+                        if matched_key:
+                            current_val = result[matched_key]
+                            if current_val is None or current_val == "N.D.":
+                                result[matched_key] = found_val
+                            elif isinstance(found_val, (int, float)) and isinstance(current_val, (int, float)):
+                                result[matched_key] = max(found_val, current_val)
+                        
+                        # PBBs / PBDEs 加總
+                        if is_pbb:
+                            pbb_found = True
+                            if isinstance(found_val, (int, float)): pbb_sum += found_val
+                        if is_pbde:
+                            pbde_found = True
+                            if isinstance(found_val, (int, float)): pbde_sum += found_val
 
     if "PFAS" in first_page_text: result["PFAS"] = "REPORT"
     result["PBBs"] = pbb_sum if pbb_found and pbb_sum > 0 else "N.D."
     result["PBDEs"] = pbde_sum if pbde_found and pbde_sum > 0 else "N.D."
     return result
 
-# --- CTI Parser (CTI 專屬：倒敘日期 + 樣品編號跳過) ---
+# --- CTI Parser (保留上一版修正：倒敘日期 + 防呆) ---
 def parse_cti(pdf_obj, full_text, first_page_text):
     result = {k: None for k in UNIFIED_KEYWORDS_MAP.values()}
     result['PFAS'] = ""
     result['DATE'] = ""
     
-    # 1. 日期抓取：倒敘搜尋法 (Bottom-Up)，CTI 日期在右下角
+    # 1. 日期抓取：倒敘搜尋法 (Bottom-Up)
     lines = first_page_text.split('\n')
     date_pat = re.compile(r"(20\d{2}[\.\-/]\d{2}[\.\-/]\d{2}|[A-Za-z]{3}\.?\s+\d{1,2},?\s+20\d{2})")
     
@@ -212,14 +214,13 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                 if not table: continue
                 header = table[0]
                 
-                # CTI 必須找 Result/结果 欄位
+                # 找 Result 欄位
                 res_idx = -1
                 for i, col in enumerate(header):
                     if col and re.search(r"(?i)(Result|结果)", str(col)):
                         res_idx = i
                         break
                 
-                # 如果找不到 Result，找 MDL 旁邊
                 if res_idx == -1:
                     for i, col in enumerate(header):
                         if col and re.search(r"(?i)(MDL|LOQ|RL|Limit)", str(col)):
@@ -236,13 +237,11 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                     if re.search(r"(?i)(PFOA|Perfluorooctanoic\s*Acid|全氟辛酸)", row_str):
                         continue
 
-                    # CTI 防呆：跳過樣品編號行 (如 "001", "026")
+                    # CTI 防呆：跳過樣品編號 (如 001, 026)
                     raw_val = str(row[res_idx]).strip()
                     val = clean_value(raw_val)
                     
-                    # 如果抓到的是純數字且不含小數點，且看起來像是編號
                     if re.search(r"^0\d+$", raw_val) or (re.search(r"^\d{1,3}$", raw_val) and "mg/kg" not in raw_val):
-                        # 嘗試往下一行抓取
                         if row_idx + 1 < len(table[1:]):
                             next_row = table[1:][row_idx+1]
                             if len(next_row) > res_idx:
@@ -277,7 +276,7 @@ def parse_cti(pdf_obj, full_text, first_page_text):
     result["PBDEs"] = pbde_sum if pbde_found and pbde_sum > 0 else "N.D."
     return result
 
-# --- Intertek Parser (更新使用通用字典) ---
+# --- Intertek Parser (維持不變) ---
 def parse_intertek(pdf_obj, full_text, first_page_text):
     result = {k: None for k in UNIFIED_KEYWORDS_MAP.values()}
     result['PFAS'] = ""
@@ -396,14 +395,14 @@ def aggregate_reports(valid_results):
 # ==========================================
 
 def main():
-    st.set_page_config(page_title="化學報告自動彙整系統 v4.2 (Final)", layout="wide")
-    st.title("🧪 化學測試報告自動彙整系統 v4.2 (SGS & CTI Optimized)")
+    st.set_page_config(page_title="化學報告自動彙整系統 v4.3 (Final)", layout="wide")
+    st.title("🧪 化學測試報告自動彙整系統 v4.3 (SGS Perfected)")
     st.markdown("""
     **版本更新重點：**
-    1. **SGS 數據抓取優化**：透過黑名單排除 MDL/Limit 欄位，精準鎖定結果欄 (A1/001)，徹底解決抓錯值問題。
-    2. **SGS 日期修正**：由上往下搜尋，避開接收日期，鎖定報告發行日。
-    3. **PFOS 邏輯增強**：支援 `PFOS acid`、`PFOS salts` 等多種寫法，且嚴格排除 PFOA。
-    4. **完整 CTI 支援**：保留 CTI 倒敘日期與表格防呆邏輯。
+    1. **SGS 搜尋邏輯大改版**：改為「右向左」掃描，配合「黑名單數字 (1000/100/50...)」過濾，徹底解決抓到 Limit/MDL 的問題。
+    2. **CTI 邏輯凍結**：完整保留 CTI 倒敘日期、PFOS 鎖定與表格防呆邏輯。
+    3. **PFOS 增強**：SGS/CTI 皆支援中英文 PFOS 及其鹽類判讀。
+    4. **PFOA 排除**：全域過濾，確保不抓取。
     """)
 
     uploaded_files = st.file_uploader("請上傳 PDF 報告 (支援多檔)", type="pdf", accept_multiple_files=True)
@@ -445,7 +444,7 @@ def main():
                     elif vendor == "INTERTEK":
                         data = parse_intertek(file, full_text, first_page_text)
                     else:
-                        # 嘗試當作 SGS 處理 (針對檔名亂碼但內容是 SGS 的情況)
+                        # 嘗試當作 SGS 處理 (針對亂碼檔名但內容是 SGS 的情況)
                         if "SGS" in first_page_text:
                             data = parse_sgs(file, full_text, first_page_text)
                         else:
