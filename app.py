@@ -6,24 +6,20 @@ import io
 from dateutil import parser
 
 # ==========================================
-# 0. 安全清除快取 (相容性修正)
+# 0. 強制清除快取 (最優先執行)
 # ==========================================
 try:
-    # 嘗試使用新版指令
-    if hasattr(st, 'cache_data'):
-        st.cache_data.clear()
-    elif hasattr(st, 'experimental_memo'):
-        st.experimental_memo.clear()
-    elif hasattr(st, 'cache'):
-        st.cache_resource.clear()
+    st.cache_data.clear()
 except:
-    pass # 如果都失敗，就不勉強清除，避免報錯
+    try:
+        st.experimental_memo.clear()
+    except:
+        pass
 
 # ==========================================
 # 1. 全局配置
 # ==========================================
 
-# 最終輸出欄位
 TARGET_ITEMS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBBs", "PBDEs",
     "DEHP", "DBP", "BBP", "DIBP",
@@ -31,7 +27,7 @@ TARGET_ITEMS = [
     "PFOS", "PFAS", "DATE", "FILENAME"
 ]
 
-# --- SGS 專用優化字典 (基於您提供的優化列表) ---
+# SGS 專用優化字典
 SGS_OPTIMIZED_MAP = {
     'Pb': ['Lead', 'Pb', '鉛', '铅'],
     'Cd': ['Cadmium', 'Cd', '鎘', '镉'],
@@ -51,26 +47,7 @@ SGS_OPTIMIZED_MAP = {
     'PFAS': ['PFAS'] 
 }
 
-# --- CTI/Intertek 通用字典 (Regex版) ---
-UNIFIED_REGEX_MAP = {
-    r"(?i)\b(Lead|Pb|铅)\b": "Pb",
-    r"(?i)\b(Cadmium|Cd|镉)\b": "Cd",
-    r"(?i)\b(Mercury|Hg|汞)\b": "Hg",
-    r"(?i)\b(Hexavalent Chromium|Cr\(?VI\)?|六价铬)\b": "Cr6+",
-    r"(?i)\b(DEHP|Di\(2-ethylhexyl\)\s*phthalate)\b": "DEHP",
-    r"(?i)\b(DBP|Dibutyl\s*phthalate)\b": "DBP",
-    r"(?i)\b(BBP|Butyl\s*benzyl\s*phthalate)\b": "BBP",
-    r"(?i)\b(DIBP|Diisobutyl\s*phthalate)\b": "DIBP",
-    r"(?i)(Fluorine|氟).*\((F|F-)\)": "F",
-    r"(?i)(Chlorine|氯|氣).*\((Cl|Cl-)\)": "Cl",
-    r"(?i)(Bromine|溴).*\((Br|Br-)\)": "Br",
-    r"(?i)(Iodine|碘).*\((I|I-)\)": "I",
-    r"(?i)(Perfluorooctane\s*sulfonic\s*acid\s*\(PFOS\)|PFOS.*(salts|及其盐)|全氟辛烷磺酸)": "PFOS"
-}
-PBB_SUBITEMS = r"(?i)(Monobromobiphenyl|Dibromobiphenyl|Tribromobiphenyl|Tetrabromobiphenyl|Pentabromobiphenyl|Hexabromobiphenyl|Heptabromobiphenyl|Octabromobiphenyl|Nonabromobiphenyl|Decabromobiphenyl|一溴联苯|二溴联苯|三溴联苯|四溴联苯|五溴联苯|六溴联苯|七溴联苯|八溴联苯|九溴联苯|十溴联苯)"
-PBDE_SUBITEMS = r"(?i)(Monobromodiphenyl ether|Dibromodiphenyl ether|Tribromodiphenyl ether|Tetrabromodiphenyl ether|Pentabromodiphenyl ether|Hexabromodiphenyl ether|Heptabromodiphenyl ether|Octabromodiphenyl ether|Nonabromodiphenyl ether|Decabromodiphenyl ether|一溴二苯醚|二溴二苯醚|三溴二苯醚|四溴二苯醚|五溴二苯醚|六溴二苯醚|七溴二苯醚|八溴二苯醚|九溴二苯醚|十溴二苯醚)"
-
-# --- SGS 專用：完整黑名單 (字串比對用) ---
+# 完整黑名單 (字串)
 SGS_IGNORE_LIST = ['2', '5', '8', '10', '50', '100', '1000']
 
 # 英文月份對照表
@@ -89,13 +66,14 @@ def clean_date_str(date_str):
     if not date_str: return "1900/01/01"
     clean_str = str(date_str).strip()
     
+    # 英文月份轉換
     for mon, digit in MONTH_MAP.items():
         if mon in clean_str:
             clean_str = clean_str.replace(mon, digit)
             break
             
     clean_str = clean_str.replace("年", "/").replace("月", "/").replace("日", "")
-    # 移除 Page 1 of 16 這類的干擾
+    # 移除 Page 1 of 16
     clean_str = re.split(r"(Page|頁)", clean_str, flags=re.IGNORECASE)[0]
     
     try:
@@ -134,20 +112,23 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
     result['PFAS'] = ""
     result['DATE'] = ""
 
-    # 1. 日期抓取 (鎖定前 15 行 + Date關鍵字)
+    # --- 1. 日期抓取 (修正版：以 Date: 切割) ---
     lines = first_page_text.split('\n')
-    for line in lines[:15]: 
+    for line in lines[:20]: 
+        # 必須包含 Date 關鍵字，且排除 Received/Testing
         if re.search(r"(?i)(Date|日期)\s*[:：]", line) and not re.search(r"(?i)(Received|Receiving|Testing|Period|接收|周期)", line):
             try:
-                # 嘗試切割出日期部分
-                date_content = re.split(r"[:：]", line, 1)[1].strip()
-                result['DATE'] = clean_date_str(date_content)
-                if result['DATE'] != "1900/01/01":
-                    break
+                # 關鍵修正：使用 'Date' 或 '日期' 進行切割，丟棄前面的 Report No.
+                parts = re.split(r"(?i)(Date|日期)\s*[:：]", line, 1)
+                if len(parts) > 2:
+                    date_content = parts[-1].strip() # 取最後一部分
+                    result['DATE'] = clean_date_str(date_content)
+                    if result['DATE'] != "1900/01/01":
+                        break
             except:
                 continue
     
-    # 2. 數據抓取
+    # --- 2. 數據抓取 ---
     pbb_sum = 0; pbde_sum = 0; pbb_found = False; pbde_found = False
     
     with pdfplumber.open(pdf_obj) as pdf:
@@ -165,16 +146,22 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                     if "PFAS" in row_str and not result['PFAS']:
                         result['PFAS'] = "REPORT"
 
+                    # 識別測項
                     matched_key = None
-                    # 使用 SGS 專用字典
                     for key, keywords in SGS_OPTIMIZED_MAP.items():
                         if any(kw.lower() in row_str.lower() for kw in keywords):
                             if key == "PFOS" and re.search(r"(?i)(Total|PFOSF|Derivative|总和|衍生物)", row_str):
                                 continue
+                            # 鹵素防呆
                             if key in ['F', 'Cl', 'Br', 'I'] and not re.search(r"\((F|Cl|Br|I)-?\)", row_str):
                                 continue
                             matched_key = key
                             break
+                    
+                    # 加總項目識別
+                    # PBBs/PBDEs 正則表達式
+                    PBB_SUBITEMS = r"(?i)(Monobromobiphenyl|Dibromobiphenyl|Tribromobiphenyl|Tetrabromobiphenyl|Pentabromobiphenyl|Hexabromobiphenyl|Heptabromobiphenyl|Octabromobiphenyl|Nonabromobiphenyl|Decabromobiphenyl|一溴联苯|二溴联苯|三溴联苯|四溴联苯|五溴联苯|六溴联苯|七溴联苯|八溴联苯|九溴联苯|十溴联苯)"
+                    PBDE_SUBITEMS = r"(?i)(Monobromodiphenyl ether|Dibromodiphenyl ether|Tribromodiphenyl ether|Tetrabromodiphenyl ether|Pentabromodiphenyl ether|Hexabromodiphenyl ether|Heptabromodiphenyl ether|Octabromodiphenyl ether|Nonabromodiphenyl ether|Decabromodiphenyl ether|一溴二苯醚|二溴二苯醚|三溴二苯醚|四溴二苯醚|五溴二苯醚|六溴二苯醚|七溴二苯醚|八溴二苯醚|九溴二苯醚|十溴二苯醚)"
                     
                     is_pbb = re.search(PBB_SUBITEMS, row_str)
                     is_pbde = re.search(PBDE_SUBITEMS, row_str)
@@ -182,21 +169,26 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                     if not matched_key and not is_pbb and not is_pbde:
                         continue 
 
+                    # 抓取數值
                     value_candidates = re.findall(r"(?i)(N\.?D\.?|Negative|Positive|<\s*\d+\.?\d*|\b\d+\.?\d*\b)", row_str)
                     found_val = None
                     
+                    # 由右向左
                     for raw_val in reversed(value_candidates):
+                        # 1. 字串清洗 (移除 <, 移除單位)
                         check_str = raw_val.strip()
                         if "<" in check_str: check_str = check_str.replace("<", "").strip()
+                        # 簡單剝離單位 (例如 1000mg)
+                        check_str = re.split(r"[a-zA-Z]", check_str)[0] 
                         
-                        # 完整黑名單字串比對
+                        # 2. 黑名單字串比對
                         if check_str in SGS_IGNORE_LIST:
                             continue 
                         
+                        # 3. 轉數值後比對 (防漏)
                         cleaned = clean_value(raw_val)
                         if cleaned is None: continue
                         
-                        # 數值防呆
                         if isinstance(cleaned, (int, float)):
                             if int(cleaned) == cleaned and str(int(cleaned)) in SGS_IGNORE_LIST:
                                 continue
@@ -225,10 +217,32 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
     return result
 
 # ==========================================
-# 4. CTI/Intertek 解析模組
+# 4. CTI/Intertek (Regex版)
 # ==========================================
+# (此處為保持程式碼簡潔，沿用上版邏輯，省略重複部分)
+# 實際執行時請務必包含完整的 parse_cti 和 parse_intertek 函數
+# 為求完整，這裡重新列出
 
 def parse_cti(pdf_obj, full_text, first_page_text):
+    # CTI/Intertek 通用字典 (Regex版)
+    UNIFIED_REGEX_MAP = {
+        r"(?i)\b(Lead|Pb|铅)\b": "Pb",
+        r"(?i)\b(Cadmium|Cd|镉)\b": "Cd",
+        r"(?i)\b(Mercury|Hg|汞)\b": "Hg",
+        r"(?i)\b(Hexavalent Chromium|Cr\(?VI\)?|六价铬)\b": "Cr6+",
+        r"(?i)\b(DEHP|Di\(2-ethylhexyl\)\s*phthalate)\b": "DEHP",
+        r"(?i)\b(DBP|Dibutyl\s*phthalate)\b": "DBP",
+        r"(?i)\b(BBP|Butyl\s*benzyl\s*phthalate)\b": "BBP",
+        r"(?i)\b(DIBP|Diisobutyl\s*phthalate)\b": "DIBP",
+        r"(?i)(Fluorine|氟).*\((F|F-)\)": "F",
+        r"(?i)(Chlorine|氯|氣).*\((Cl|Cl-)\)": "Cl",
+        r"(?i)(Bromine|溴).*\((Br|Br-)\)": "Br",
+        r"(?i)(Iodine|碘).*\((I|I-)\)": "I",
+        r"(?i)(Perfluorooctane\s*sulfonic\s*acid\s*\(PFOS\)|PFOS.*(salts|及其盐)|全氟辛烷磺酸)": "PFOS"
+    }
+    PBB_SUBITEMS = r"(?i)(Monobromobiphenyl|Dibromobiphenyl|Tribromobiphenyl|Tetrabromobiphenyl|Pentabromobiphenyl|Hexabromobiphenyl|Heptabromobiphenyl|Octabromobiphenyl|Nonabromobiphenyl|Decabromobiphenyl|一溴联苯|二溴联苯|三溴联苯|四溴联苯|五溴联苯|六溴联苯|七溴联苯|八溴联苯|九溴联苯|十溴联苯)"
+    PBDE_SUBITEMS = r"(?i)(Monobromodiphenyl ether|Dibromodiphenyl ether|Tribromodiphenyl ether|Tetrabromodiphenyl ether|Pentabromodiphenyl ether|Hexabromodiphenyl ether|Heptabromodiphenyl ether|Octabromodiphenyl ether|Nonabromodiphenyl ether|Decabromodiphenyl ether|一溴二苯醚|二溴二苯醚|三溴二苯醚|四溴二苯醚|五溴二苯醚|六溴二苯醚|七溴二苯醚|八溴二苯醚|九溴二苯醚|十溴二苯醚)"
+
     result = {k: None for k in TARGET_ITEMS if k not in ['FILENAME', 'DATE']}
     result['PFAS'] = ""
     result['DATE'] = ""
@@ -292,6 +306,25 @@ def parse_cti(pdf_obj, full_text, first_page_text):
     return result
 
 def parse_intertek(pdf_obj, full_text, first_page_text):
+    # CTI/Intertek 通用字典 (Regex版)
+    UNIFIED_REGEX_MAP = {
+        r"(?i)\b(Lead|Pb|铅)\b": "Pb",
+        r"(?i)\b(Cadmium|Cd|镉)\b": "Cd",
+        r"(?i)\b(Mercury|Hg|汞)\b": "Hg",
+        r"(?i)\b(Hexavalent Chromium|Cr\(?VI\)?|六价铬)\b": "Cr6+",
+        r"(?i)\b(DEHP|Di\(2-ethylhexyl\)\s*phthalate)\b": "DEHP",
+        r"(?i)\b(DBP|Dibutyl\s*phthalate)\b": "DBP",
+        r"(?i)\b(BBP|Butyl\s*benzyl\s*phthalate)\b": "BBP",
+        r"(?i)\b(DIBP|Diisobutyl\s*phthalate)\b": "DIBP",
+        r"(?i)(Fluorine|氟).*\((F|F-)\)": "F",
+        r"(?i)(Chlorine|氯|氣).*\((Cl|Cl-)\)": "Cl",
+        r"(?i)(Bromine|溴).*\((Br|Br-)\)": "Br",
+        r"(?i)(Iodine|碘).*\((I|I-)\)": "I",
+        r"(?i)(Perfluorooctane\s*sulfonic\s*acid\s*\(PFOS\)|PFOS.*(salts|及其盐)|全氟辛烷磺酸)": "PFOS"
+    }
+    PBB_SUBITEMS = r"(?i)(Monobromobiphenyl|Dibromobiphenyl|Tribromobiphenyl|Tetrabromobiphenyl|Pentabromobiphenyl|Hexabromobiphenyl|Heptabromobiphenyl|Octabromobiphenyl|Nonabromobiphenyl|Decabromobiphenyl|一溴联苯|二溴联苯|三溴联苯|四溴联苯|五溴联苯|六溴联苯|七溴联苯|八溴联苯|九溴联苯|十溴联苯)"
+    PBDE_SUBITEMS = r"(?i)(Monobromodiphenyl ether|Dibromodiphenyl ether|Tribromodiphenyl ether|Tetrabromodiphenyl ether|Pentabromodiphenyl ether|Hexabromodiphenyl ether|Heptabromodiphenyl ether|Octabromodiphenyl ether|Nonabromodiphenyl ether|Decabromodiphenyl ether|一溴二苯醚|二溴二苯醚|三溴二苯醚|四溴二苯醚|五溴二苯醚|六溴二苯醚|七溴二苯醚|八溴二苯醚|九溴二苯醚|十溴二苯醚)"
+
     result = {k: None for k in TARGET_ITEMS if k not in ['FILENAME', 'DATE']}
     result['PFAS'] = ""
     result['DATE'] = ""
@@ -389,12 +422,13 @@ def aggregate_reports(valid_results):
     return pd.DataFrame([final_row])
 
 def main():
-    st.set_page_config(page_title="化學報告自動彙整系統 v4.8 (Safe Fix)", layout="wide")
-    st.title("🧪 化學測試報告自動彙整系統 v4.8 (Safe Fix)")
+    st.set_page_config(page_title="化學報告自動彙整系統 v4.9 (Final Debug)", layout="wide")
+    st.title("🧪 化學測試報告自動彙整系統 v4.9 (Final Debug)")
     st.markdown("""
-    **SGS 專屬修正：**
-    1. **錯誤修復**：修正舊版 Streamlit 造成的快取錯誤 (AttributeError)。
-    2. **邏輯保留**：完整保留您要求的優化字典與黑名單邏輯。
+    **版本修正：**
+    1. **日期精準切割**：改用 `Date:` 關鍵字切割，徹底解決發行日抓錯問題。
+    2. **黑名單增強**：加入 `split` 邏輯，防止單位沾黏導致比對失敗 (解決 1000 殘留問題)。
+    3. **快取歸零**：強制刷新運算結果。
     """)
 
     uploaded_files = st.file_uploader("請上傳 PDF 報告 (支援多檔)", type="pdf", accept_multiple_files=True)
