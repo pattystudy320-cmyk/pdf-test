@@ -45,8 +45,14 @@ UNIFIED_KEYWORDS_MAP = {
 PBB_SUBITEMS = r"(?i)(Monobromobiphenyl|Dibromobiphenyl|Tribromobiphenyl|Tetrabromobiphenyl|Pentabromobiphenyl|Hexabromobiphenyl|Heptabromobiphenyl|Octabromobiphenyl|Nonabromobiphenyl|Decabromobiphenyl|一溴联苯|二溴联苯|三溴联苯|四溴联苯|五溴联苯|六溴联苯|七溴联苯|八溴联苯|九溴联苯|十溴联苯)"
 PBDE_SUBITEMS = r"(?i)(Monobromodiphenyl ether|Dibromodiphenyl ether|Tribromodiphenyl ether|Tetrabromodiphenyl ether|Pentabromodiphenyl ether|Hexabromodiphenyl ether|Heptabromodiphenyl ether|Octabromodiphenyl ether|Nonabromodiphenyl ether|Decabromodiphenyl ether|一溴二苯醚|二溴二苯醚|三溴二苯醚|四溴二苯醚|五溴二苯醚|六溴二苯醚|七溴二苯醚|八溴二苯醚|九溴二苯醚|十溴二苯醚)"
 
-# SGS 數值黑名單 (常見的 Limit 和 MDL 值，用於過濾非結果數字)
+# SGS 數值黑名單 (常見的 Limit 和 MDL 值)
 SGS_VALUE_BLACKLIST = [1000, 100, 50, 10, 8, 5, 2]
+
+# 英文月份對照表 (輔助日期解析)
+MONTH_MAP = {
+    "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04", "May": "05", "Jun": "06",
+    "Jul": "07", "Aug": "08", "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12"
+}
 
 # ==========================================
 # 2. 通用工具函數
@@ -57,13 +63,16 @@ def standardize_date(date_str):
     if not date_str: return "1900/01/01"
     clean_str = str(date_str).strip()
     
-    # 簡單清洗，保留英文月份
+    # 嘗試處理英文月份 (如 Feb 27, 2025)
+    for mon, digit in MONTH_MAP.items():
+        if mon in clean_str:
+            # 簡單替換，方便 parser 讀取
+            clean_str = clean_str.replace(mon, digit)
+            
     clean_str = clean_str.replace("年", "/").replace("月", "/").replace("日", "")
-    # 移除多餘的點 (如 2024. 10. 17.)
     clean_str = re.sub(r"(\d{4})[\.\s]+(\d{1,2})[\.\s]+(\d{1,2})\.?", r"\1/\2/\3", clean_str)
     
     try:
-        # fuzzy=True 可以處理 "Feb 27, 2025" 這種格式
         dt = parser.parse(clean_str, fuzzy=True)
         return dt.strftime("%Y/%m/%d")
     except:
@@ -95,18 +104,19 @@ def get_value_priority(val):
 # 3. 廠商專屬解析模組
 # ==========================================
 
-# --- SGS Parser (改版：右向左掃描 + 黑名單過濾) ---
+# --- SGS Parser (強力版：整行掃描 + 右向左過濾) ---
 def parse_sgs(pdf_obj, full_text, first_page_text):
     result = {k: None for k in UNIFIED_KEYWORDS_MAP.values()}
     result['PFAS'] = ""
     result['DATE'] = ""
 
     # 1. 日期抓取：由上往下 (Top-Down)，SGS 日期通常在右上角
-    # 必須避開 "Sample Receiving Date" (接收日期)
     lines = first_page_text.split('\n')
     for line in lines[:40]: 
+        # 尋找 Date 關鍵字，但排除 Received, Testing, Period
         if re.search(r"(?i)(Date|日期)", line) and not re.search(r"(?i)(Received|Receiving|Testing|Period|接收|周期)", line):
-            # 抓取日期格式 (支援 2025/02/27 或 Feb 27, 2025)
+            # 抓取日期格式 YYYY/MM/DD 或 Mon DD, YYYY
+            # 擴充 Regex 以支援 Feb 27, 2025 這種格式
             match = re.search(r"(20\d{2}[-./年]\s?\d{1,2}[-./月]\s?\d{1,2}|[A-Za-z]{3}\s+\d{1,2}[,\s]+\d{4})", line)
             if match:
                 result['DATE'] = standardize_date(match.group(0))
@@ -121,8 +131,8 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
             for table in tables:
                 if not table: continue
                 
-                # 遍歷每一行數據
-                for row in table: # SGS 改為直接掃描每一行，不依賴 Header 定位
+                # 直接遍歷每一行，不依賴 Header 定位 (解決欄位黏合問題)
+                for row in table: 
                     # 組合整行文字來判斷測項
                     row_str = " ".join([str(c) for c in row if c]).replace("\n", " ")
                     
@@ -149,19 +159,22 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                     if not matched_key and not is_pbb and not is_pbde:
                         continue # 如果這行沒有關鍵字，就跳過
 
-                    # --- SGS 核心邏輯：右向左掃描 + 數值過濾 (解決抓到 1000/2 的問題) ---
+                    # --- SGS 核心邏輯：從整行文字中提取所有數值，再由右向左過濾 ---
+                    # 1. 用 Regex 抓出該行所有的 N.D. 或 數字
+                    # 模式包含：N.D., Negative, <數字, 純數字
+                    value_candidates = re.findall(r"(?i)(N\.?D\.?|Negative|Positive|<\s*\d+\.?\d*|\b\d+\.?\d*\b)", row_str)
+                    
                     found_val = None
                     
-                    # 從右邊開始往左找 (Reversed)
-                    for cell in reversed(row):
-                        val_str = str(cell).strip()
-                        cleaned = clean_value(val_str)
+                    # 2. 從右邊開始往左找 (Reversed)
+                    for raw_val in reversed(value_candidates):
+                        cleaned = clean_value(raw_val)
                         
                         if cleaned is None: continue
                         
                         # 過濾黑名單數字 (解決抓到 Limit/MDL 問題)
                         if isinstance(cleaned, (int, float)):
-                            # 如果是整數，且在黑名單中 (如 1000, 100, 2)，跳過，繼續往左找
+                            # 如果是整數，且在黑名單中 (如 1000, 100, 2)，跳過
                             if int(cleaned) == cleaned and int(cleaned) in SGS_VALUE_BLACKLIST:
                                 continue
                         
@@ -399,14 +412,13 @@ def aggregate_reports(valid_results):
 # ==========================================
 
 def main():
-    st.set_page_config(page_title="化學報告自動彙整系統 v4.3 (Final)", layout="wide")
-    st.title("🧪 化學測試報告自動彙整系統 v4.3 (SGS Perfected)")
+    st.set_page_config(page_title="化學報告自動彙整系統 v4.4 (Final Fix)", layout="wide")
+    st.title("🧪 化學測試報告自動彙整系統 v4.4 (SGS Logic Fix)")
     st.markdown("""
-    **版本更新重點：**
-    1. **SGS 搜尋邏輯大改版**：改為「右向左」掃描，配合「黑名單數字 (1000/100/50...)」過濾，徹底解決抓到 Limit/MDL 的問題。
-    2. **CTI 邏輯凍結**：完整保留 CTI 倒敘日期、PFOS 鎖定與表格防呆邏輯。
-    3. **PFOS 增強**：SGS/CTI 皆支援中英文 PFOS 及其鹽類判讀。
-    4. **PFOA 排除**：全域過濾，確保不抓取。
+    **SGS 專屬強力修正：**
+    1. **整行文字掃描**：不再依賴 PDF 格線，改為分析整行文字，解決 Limit 與 Result 黏合問題。
+    2. **右向左過濾**：抓出所有數字後，從右邊開始過濾黑名單 (1000, 100...)，精確鎖定結果。
+    3. **日期增強**：增加英文月份支援，解決 Feb 27 無法解析的問題。
     """)
 
     uploaded_files = st.file_uploader("請上傳 PDF 報告 (支援多檔)", type="pdf", accept_multiple_files=True)
@@ -448,7 +460,7 @@ def main():
                     elif vendor == "INTERTEK":
                         data = parse_intertek(file, full_text, first_page_text)
                     else:
-                        # 嘗試當作 SGS 處理 (針對亂碼檔名但內容是 SGS 的情況)
+                        # 嘗試當作 SGS 處理
                         if "SGS" in first_page_text:
                             data = parse_sgs(file, full_text, first_page_text)
                         else:
