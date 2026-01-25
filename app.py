@@ -45,7 +45,7 @@ UNIFIED_KEYWORDS_MAP = {
 PBB_SUBITEMS = r"(?i)(Monobromobiphenyl|Dibromobiphenyl|Tribromobiphenyl|Tetrabromobiphenyl|Pentabromobiphenyl|Hexabromobiphenyl|Heptabromobiphenyl|Octabromobiphenyl|Nonabromobiphenyl|Decabromobiphenyl|一溴联苯|二溴联苯|三溴联苯|四溴联苯|五溴联苯|六溴联苯|七溴联苯|八溴联苯|九溴联苯|十溴联苯)"
 PBDE_SUBITEMS = r"(?i)(Monobromodiphenyl ether|Dibromodiphenyl ether|Tribromodiphenyl ether|Tetrabromodiphenyl ether|Pentabromodiphenyl ether|Hexabromodiphenyl ether|Heptabromodiphenyl ether|Octabromodiphenyl ether|Nonabromodiphenyl ether|Decabromodiphenyl ether|一溴二苯醚|二溴二苯醚|三溴二苯醚|四溴二苯醚|五溴二苯醚|六溴二苯醚|七溴二苯醚|八溴二苯醚|九溴二苯醚|十溴二苯醚)"
 
-# SGS 數值黑名單 (常見的 Limit 和 MDL 值)
+# SGS 數值黑名單 (常見的 Limit 和 MDL 值，用於過濾非結果數字)
 SGS_VALUE_BLACKLIST = [1000, 100, 50, 10, 8, 5, 2]
 
 # ==========================================
@@ -56,11 +56,14 @@ def standardize_date(date_str):
     """標準化日期格式為 YYYY/MM/DD"""
     if not date_str: return "1900/01/01"
     clean_str = str(date_str).strip()
+    
+    # 簡單清洗，保留英文月份
     clean_str = clean_str.replace("年", "/").replace("月", "/").replace("日", "")
-    # 支援 2024. 10. 17. -> 2024/10/17
+    # 移除多餘的點 (如 2024. 10. 17.)
     clean_str = re.sub(r"(\d{4})[\.\s]+(\d{1,2})[\.\s]+(\d{1,2})\.?", r"\1/\2/\3", clean_str)
     
     try:
+        # fuzzy=True 可以處理 "Feb 27, 2025" 這種格式
         dt = parser.parse(clean_str, fuzzy=True)
         return dt.strftime("%Y/%m/%d")
     except:
@@ -92,7 +95,7 @@ def get_value_priority(val):
 # 3. 廠商專屬解析模組
 # ==========================================
 
-# --- SGS Parser (改版：右向左掃描 + 數值過濾) ---
+# --- SGS Parser (改版：右向左掃描 + 黑名單過濾) ---
 def parse_sgs(pdf_obj, full_text, first_page_text):
     result = {k: None for k in UNIFIED_KEYWORDS_MAP.values()}
     result['PFAS'] = ""
@@ -103,6 +106,7 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
     lines = first_page_text.split('\n')
     for line in lines[:40]: 
         if re.search(r"(?i)(Date|日期)", line) and not re.search(r"(?i)(Received|Receiving|Testing|Period|接收|周期)", line):
+            # 抓取日期格式 (支援 2025/02/27 或 Feb 27, 2025)
             match = re.search(r"(20\d{2}[-./年]\s?\d{1,2}[-./月]\s?\d{1,2}|[A-Za-z]{3}\s+\d{1,2}[,\s]+\d{4})", line)
             if match:
                 result['DATE'] = standardize_date(match.group(0))
@@ -145,7 +149,7 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                     if not matched_key and not is_pbb and not is_pbde:
                         continue # 如果這行沒有關鍵字，就跳過
 
-                    # --- SGS 核心邏輯：右向左掃描 + 數值過濾 ---
+                    # --- SGS 核心邏輯：右向左掃描 + 數值過濾 (解決抓到 1000/2 的問題) ---
                     found_val = None
                     
                     # 從右邊開始往左找 (Reversed)
@@ -157,11 +161,11 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                         
                         # 過濾黑名單數字 (解決抓到 Limit/MDL 問題)
                         if isinstance(cleaned, (int, float)):
-                            # 如果是整數，且在黑名單中，極有可能是 Limit/MDL，跳過
+                            # 如果是整數，且在黑名單中 (如 1000, 100, 2)，跳過，繼續往左找
                             if int(cleaned) == cleaned and int(cleaned) in SGS_VALUE_BLACKLIST:
                                 continue
                         
-                        # 如果找到 N.D. 或 非黑名單數字，就是它了！
+                        # 如果找到 N.D. 或 非黑名單數字 (如 7, 12.5)，就是它了！
                         found_val = cleaned
                         break # 找到就停止
                     
@@ -187,7 +191,7 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
     result["PBDEs"] = pbde_sum if pbde_found and pbde_sum > 0 else "N.D."
     return result
 
-# --- CTI Parser (保留上一版修正：倒敘日期 + 防呆) ---
+# --- CTI Parser (保留倒敘日期 + 防呆 + 專屬字典) ---
 def parse_cti(pdf_obj, full_text, first_page_text):
     result = {k: None for k in UNIFIED_KEYWORDS_MAP.values()}
     result['PFAS'] = ""
@@ -237,7 +241,7 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                     if re.search(r"(?i)(PFOA|Perfluorooctanoic\s*Acid|全氟辛酸)", row_str):
                         continue
 
-                    # CTI 防呆：跳過樣品編號 (如 001, 026)
+                    # CTI 防呆：跳過樣品編號行 (如 "001", "026")
                     raw_val = str(row[res_idx]).strip()
                     val = clean_value(raw_val)
                     
