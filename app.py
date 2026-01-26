@@ -1,480 +1,516 @@
 import streamlit as st
 import pdfplumber
 import pandas as pd
-import re
 import io
-from dateutil import parser
+import re
+from datetime import datetime
 
-# ==========================================
-# 0. 強制清除快取
-# ==========================================
-try:
-    if hasattr(st, 'cache_data'):
-        st.cache_data.clear()
-    elif hasattr(st, 'experimental_memo'):
-        st.experimental_memo.clear()
-    elif hasattr(st, 'cache'):
-        st.cache_resource.clear()
-except:
-    pass
+# --- 1. 定義欄位與關鍵字 ---
 
-# ==========================================
-# 1. 全局配置與字典
-# ==========================================
-TARGET_ITEMS = [
-    "Pb", "Cd", "Hg", "Cr6+", "PBBs", "PBDEs",
-    "DEHP", "DBP", "BBP", "DIBP",
-    "F", "Cl", "Br", "I",
-    "PFOS", "PFAS", "DATE", "FILENAME"
+SIMPLE_KEYWORDS = {
+    "Pb": ["Lead", "鉛", "Pb"],
+    "Cd": ["Cadmium", "鎘", "Cd"],
+    "Hg": ["Mercury", "汞", "Hg"],
+    "Cr6+": ["Hexavalent Chromium", "六價鉻", "Cr(VI)", "Chromium VI"],
+    "DEHP": ["DEHP", "Di(2-ethylhexyl) phthalate", "Bis(2-ethylhexyl) phthalate"],
+    "BBP": ["BBP", "Butyl benzyl phthalate"],
+    "DBP": ["DBP", "Dibutyl phthalate"],
+    "DIBP": ["DIBP", "Diisobutyl phthalate"],
+    "PFOS": ["Perfluorooctane sulfonates", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid", "全氟辛烷磺酸"],
+    "F": ["Fluorine", "氟"],
+    "CL": ["Chlorine", "氯"],
+    "BR": ["Bromine", "溴"],
+    "I": ["Iodine", "碘"]
+}
+
+GROUP_KEYWORDS = {
+    "PBB": [
+        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和",
+        "Polybromobiphenyl", "Polybromobiphenyls",
+        "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
+        "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
+        "Heptabromobiphenyl", "Octabromobiphenyl", "Nonabromobiphenyl", 
+        "Decabromobiphenyl", 
+        "Monobrominated", "Dibrominated", "Tribrominated", 
+        "Tetrabrominated", "Pentabrominated", "Hexabrominated", 
+        "Heptabrominated", "Octabrominated", "Nonabrominated", 
+        "Decabrominated", "bromobiphenyl"
+    ],
+    "PBDE": [
+        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和",
+        "Polybromodiphenyl ether", "Polybromodiphenyl ethers",
+        "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
+        "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
+        "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
+        "Decabromodiphenyl ether", 
+        "Monobrominated Diphenyl", "Dibrominated Diphenyl", "Tribrominated Diphenyl",
+        "Tetrabrominated Diphenyl", "Pentabrominated Diphenyl", "Hexabrominated Diphenyl",
+        "Heptabrominated Diphenyl", "Octabrominated Diphenyl", "Nonabrominated Diphenyl",
+        "Decabrominated Diphenyl", "bromodiphenyl ether"
+    ]
+}
+
+PFAS_SUMMARY_KEYWORDS = [
+    "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
 ]
 
-# --- SGS 專用字典 ---
-SGS_OPTIMIZED_MAP = {
-    'Pb': ['Lead', 'Pb', '鉛', '铅'],
-    'Cd': ['Cadmium', 'Cd', '鎘', '镉'],
-    'Hg': ['Mercury', 'Hg', '汞'],
-    'Cr6+': ['Hexavalent Chromium', 'Cr(VI)', '六價鉻', '六价铬', 'Hexavalent', 'Cr6+'],
-    'PBBs': ['Polybrominated biphenyls', 'PBB', '多溴聯苯', '多溴联苯', 'Sum of PBBs'],
-    'PBDEs': ['Polybrominated diphenyl ethers', 'PBDE', '多溴二苯醚', 'Sum of PBDEs'],
-    'DEHP': ['Bis(2-ethylhexyl) phthalate', 'DEHP', '鄰苯二甲酸二(2-乙基己基)酯', 'Di(2-ethylhexyl) phthalate'],
-    'DBP': ['Dibutyl phthalate', 'DBP', '鄰苯二甲酸二丁酯'],
-    'BBP': ['Butyl benzyl phthalate', 'BBP', '鄰苯二甲酸丁苄酯'],
-    'DIBP': ['Diisobutyl phthalate', 'DIBP', '鄰苯二甲酸二異丁酯'],
-    'F': ['Fluorine', '氟', 'Halogen-Fluorine'],
-    'Cl': ['Chlorine', '氯', 'Halogen-Chlorine'],
-    'Br': ['Bromine', '溴', 'Halogen-Bromine'],
-    'I': ['Iodine', '碘', 'Halogen-Iodine'],
-    'PFOS': ['Perfluorooctane sulfonic acid', 'PFOS', '全氟辛烷磺酸', 'Perfluorooctane Sulfonates'],
-    'PFAS': ['PFAS']
-}
+# MSDS 排除關鍵字 (用於表格標題)
+MSDS_HEADER_KEYWORDS = [
+    "content", "composition", "concentration", "含量", "成分"
+]
 
-# --- CTI/Intertek 通用字典 ---
-UNIFIED_REGEX_MAP = {
-    r"(?i)\b(Lead|Pb|铅)\b": "Pb",
-    r"(?i)\b(Cadmium|Cd|镉)\b": "Cd",
-    r"(?i)\b(Mercury|Hg|汞)\b": "Hg",
-    r"(?i)\b(Hexavalent Chromium|Cr\(?VI\)?|六价铬)\b": "Cr6+",
-    r"(?i)\b(DEHP|Di\(2-ethylhexyl\)\s*phthalate)\b": "DEHP",
-    r"(?i)\b(DBP|Dibutyl\s*phthalate)\b": "DBP",
-    r"(?i)\b(BBP|Butyl\s*benzyl\s*phthalate)\b": "BBP",
-    r"(?i)\b(DIBP|Diisobutyl\s*phthalate)\b": "DIBP",
-    r"(?i)(Fluorine|氟).*\((F|F-)\)": "F",
-    r"(?i)(Chlorine|氯|氣).*\((Cl|Cl-)\)": "Cl",
-    r"(?i)(Bromine|溴).*\((Br|Br-)\)": "Br",
-    r"(?i)(Iodine|碘).*\((I|I-)\)": "I",
-    r"(?i)(Perfluorooctane\s*sulfonic\s*acid\s*\(PFOS\)|PFOS.*(salts|及其盐)|全氟辛烷磺酸)": "PFOS"
-}
+OUTPUT_COLUMNS = [
+    "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
+    "DEHP", "BBP", "DBP", "DIBP", 
+    "PFOS", "PFAS", "F", "CL", "BR", "I", 
+    "日期", "檔案名稱"
+]
 
-# 加總項目 Regex
-PBB_SUBITEMS = r"(?i)(Monobromobiphenyl|Dibromobiphenyl|Tribromobiphenyl|Tetrabromobiphenyl|Pentabromobiphenyl|Hexabromobiphenyl|Heptabromobiphenyl|Octabromobiphenyl|Nonabromobiphenyl|Decabromobiphenyl|一溴联苯|二溴联苯|三溴联苯|四溴联苯|五溴联苯|六溴联苯|七溴联苯|八溴联苯|九溴联苯|十溴联苯)"
-PBDE_SUBITEMS = r"(?i)(Monobromodiphenyl ether|Dibromodiphenyl ether|Tribromodiphenyl ether|Tetrabromodiphenyl ether|Pentabromodiphenyl ether|Hexabromodiphenyl ether|Heptabromodiphenyl ether|Octabromodiphenyl ether|Nonabromodiphenyl ether|Decabromodiphenyl ether|一溴二苯醚|二溴二苯醚|三溴二苯醚|四溴二苯醚|五溴二苯醚|六溴二苯醚|七溴二苯醚|八溴二苯醚|九溴二苯醚|十溴二苯醚)"
+# --- 2. 輔助功能 ---
 
-# 英文月份對照表
-MONTH_MAP = {
-    "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04", "May": "05", "Jun": "06",
-    "Jul": "07", "Aug": "08", "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12",
-    "JAN": "01", "FEB": "02", "MAR": "03", "APR": "04", "MAY": "05", "JUN": "06",
-    "JUL": "07", "AUG": "08", "SEP": "09", "OCT": "10", "NOV": "11", "DEC": "12"
-}
+def clean_text(text):
+    if not text: return ""
+    return str(text).replace('\n', ' ').strip()
 
-# ==========================================
-# 2. 工具函數
-# ==========================================
-def clean_date_str(date_str):
-    if not date_str: return "1900/01/01"
-    clean_str = str(date_str).strip()
-    clean_str = clean_str.replace("年", "/").replace("月", "/").replace("日", "")
-    for mon, digit in MONTH_MAP.items():
-        if mon in clean_str:
-            clean_str = clean_str.replace(mon, digit)
-            break
-    clean_str = re.split(r"(Page|頁)", clean_str, flags=re.IGNORECASE)[0]
-    try:
-        dt = parser.parse(clean_str, fuzzy=True)
-        return dt.strftime("%Y/%m/%d")
-    except:
-        return "1900/01/01"
+def find_report_start_page(pdf):
+    """
+    智慧跳過封面/承認書，尋找 'Test Report' 起始頁
+    """
+    for i in range(min(10, len(pdf.pages))):
+        text = (pdf.pages[i].extract_text() or "").lower()
+        if "test report" in text or "測試報告" in text:
+            return i
+    return 0
 
-def clean_value(val_str):
-    if not val_str: return None
-    val_str = str(val_str).strip()
-    # 排除常見非數值標題
-    if val_str.lower() in ["mdl", "limit", "unit", "result", "loq", "requirement", "rl"]:
-        return None
-    # 處理 N.D. / Negative
-    if re.search(r"(?i)(N\.?D\.?|Not Detected|<|Negative)", val_str):
-        return "N.D."
-    if re.search(r"(?i)(Positive)", val_str):
-        return "POSITIVE"
-    # 提取數字
-    nums = re.findall(r"\d+\.?\d*", val_str)
-    if nums:
-        try:
-            return float(nums[0])
-        except:
-            pass
-    return None
-
-def get_value_priority(val):
-    if isinstance(val, (int, float)): return (3, val)
-    if val in ["NEGATIVE", "POSITIVE"]: return (2, 0)
-    if val == "N.D.": return (1, 0)
-    return (0, 0)
-
-# ==========================================
-# 3. SGS 解析模組 (v7.1 Hg Anchor + 智慧特徵)
-# ==========================================
-def parse_sgs(pdf_obj, full_text, first_page_text):
-    result = {k: None for k in SGS_OPTIMIZED_MAP.keys()}
-    result['PFAS'] = ""
-    result['DATE'] = ""
+def extract_dates_v36_5(text):
+    """
+    v36.5 核心日期邏輯：萬能清洗 + 積分權重
+    """
+    lines = text.split('\n')
+    candidates = [] # (score, date_object)
     
-    # --- 1. 日期抓取 (v7.0 特徵搜尋) ---
-    lines = first_page_text.split('\n')
-    for line in lines[:40]:
-        if re.search(r"(?i)(Date|日期)", line) and not re.search(r"(?i)(Received|Testing|Period|接收|周期)", line):
-            match_en_month = re.search(r"(?i)(\d{1,2}[-.\s]*)?(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-.\s,]*(\d{1,2})?[-.\s,]*(\d{4})", line)
-            match_chi = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", line)
-            match_num = re.search(r"(\d{4}[-./]\s?\d{1,2}[-./]\s?\d{1,2})", line)
+    # 1. 權重設定
+    bonus_kw = ["report date", "issue date", "date:", "日期:", "dated"]
+    poison_kw = [
+        "approve", "approved", "approval", "approver", 
+        "check", "checked", "review", "reviewed",      
+        "receive", "received", "receipt",
+        "period", "testing period", "started", "from", "to ",
+        "承認", "核准", "檢驗", "收件", "有效", "expiry", "valid", "期間"
+    ]
 
-            found_date_str = None
-            if match_en_month: found_date_str = match_en_month.group(0)
-            elif match_chi: found_date_str = f"{match_chi.group(1)}/{match_chi.group(2)}/{match_chi.group(3)}"
-            elif match_num: found_date_str = match_num.group(0)
+    # 2. 萬能正則 (針對清洗過後的字串: 標點符號都變空白)
+    # YYYY MM DD (2025 01 08)
+    pat_ymd = r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(0?[1-9]|[12][0-9]|3[01])"
+    # DD Mon YYYY (06 Jan 2025)
+    pat_dmy = r"(0?[1-9]|[12][0-9]|3[01])\s+([a-zA-Z]{3,})\s+(20\d{2})"
+    # Mon DD YYYY (Jan 08 2025)
+    pat_mdy = r"([a-zA-Z]{3,})\s+(0?[1-9]|[12][0-9]|3[01])\s+(20\d{2})"
+    # 中文 (保留原樣匹配)
+    pat_zh = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(0?[1-9]|[12][0-9]|3[01])\s*日"
+
+    for line in lines:
+        line_lower = line.lower()
+        
+        # --- A. 計算分數 ---
+        score = 1
+        if any(bad in line_lower for bad in poison_kw):
+            score = -100 # 毒藥：承認日期、測試期間、收件日期
+        elif any(good in line_lower for good in bonus_kw):
+            score = 100 # 黃金：報告日期
+
+        # --- B. 暴力清洗 (解決 CTI 的點逗號、SGS 的橫線) ---
+        # 將 . , - / 全部換成空白
+        clean_line = line.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
+        # 壓縮多餘空白
+        clean_line = " ".join(clean_line.split())
+
+        # --- C. 嘗試匹配 ---
+        found_dt = None
+        
+        # C-1: 中文格式 (優先)
+        zh_match = re.search(pat_zh, line) 
+        if zh_match:
+            try:
+                y, m, d = zh_match.groups()
+                found_dt = datetime(int(y), int(m), int(d))
+            except: pass
+        
+        # C-2: 英文/數字格式 (用清洗後的 clean_line)
+        if not found_dt:
+            for pat in [pat_ymd, pat_dmy, pat_mdy]:
+                matches = re.finditer(pat, clean_line, re.IGNORECASE)
+                for match in matches:
+                    try:
+                        groups = match.groups()
+                        date_str = " ".join(groups)
+                        # 嘗試解析多種格式
+                        for fmt in ["%Y %m %d", "%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y"]:
+                            try:
+                                dt = datetime.strptime(date_str, fmt)
+                                if 2000 <= dt.year <= 2030:
+                                    found_dt = dt
+                                    break
+                            except: continue
+                        if found_dt: break
+                    except: continue
+                if found_dt: break
+        
+        if found_dt:
+            candidates.append((score, found_dt))
             
-            if found_date_str:
-                result['DATE'] = clean_date_str(found_date_str)
-                break
+    return candidates
+
+def is_suspicious_limit_value(val):
+    try:
+        n = float(val)
+        if n in [1000.0, 100.0, 50.0]: return True
+        return False
+    except: return False
+
+def parse_value_priority(value_str):
+    raw_val = clean_text(value_str)
     
-    # --- 2. 數據抓取 (Hg Anchor Logic) ---
-    pbb_sum = 0; pbde_sum = 0; pbb_found = False; pbde_found = False
+    # 移除括號內的單位
+    if "(" in raw_val and ")" in raw_val:
+        if re.search(r"\(\d+\)", raw_val):
+            raw_val = raw_val.split("(")[0].strip()
+    
+    val = raw_val.replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
+    
+    if not val: return (0, 0, "")
+    val_lower = val.lower()
 
-    with pdfplumber.open(pdf_obj) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                if not table: continue
+    if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits"]: 
+        return (0, 0, "")
 
-                # === Step 1: 尋找 Hg 錨點 (Anchor) ===
-                anchor_col_idx = -1
-                for r_idx, row in enumerate(table):
-                    row_str = " ".join([str(c) for c in row if c]).lower()
-                    # 尋找含有 'mercury' 或 'hg' 或 '汞' 的行
-                    if re.search(r"(?i)(mercury|hg|汞)", row_str):
-                        # 在這一行中尋找 'N.D.' 或 'Negative' 所在的欄位
-                        for c_idx, cell in enumerate(row):
-                            cell_val = str(cell).strip()
-                            if re.search(r"(?i)(N\.?D\.?|Negative|<)", cell_val):
-                                anchor_col_idx = c_idx
-                                break
-                        if anchor_col_idx != -1:
+    if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
+    
+    num_only_match = re.search(r"([\d\.]+)", val)
+    if num_only_match:
+        if is_suspicious_limit_value(num_only_match.group(1)): return (0, 0, "")
+
+    if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower: return (1, 0, "N.D.")
+    if "negative" in val_lower or "陰性" in val_lower: return (2, 0, "NEGATIVE")
+    
+    # 支援 ▲ 符號
+    num_match = re.search(r"^([\d\.]+)(.*)$", val)
+    if num_match:
+        try:
+            number = float(num_match.group(1))
+            return (3, number, val)
+        except: pass
+            
+    return (0, 0, val)
+
+def check_pfas_in_summary(text):
+    txt_lower = text.lower()
+    for kw in PFAS_SUMMARY_KEYWORDS:
+        if kw.lower() in txt_lower: return True
+    return False
+
+def identify_company(text):
+    txt = text.lower()
+    if "sgs" in txt: return "SGS"
+    if "intertek" in txt: return "INTERTEK"
+    if "cti" in txt or "centre testing" in txt: return "CTI"
+    if "ctic" in txt: return "CTIC"
+    return "OTHERS"
+
+# --- 3. 核心：表格識別 ---
+
+def identify_columns_by_company(table, company):
+    item_idx = -1
+    result_idx = -1
+    mdl_idx = -1
+    limit_idx = -1
+    
+    max_scan_rows = min(3, len(table))
+    full_header_text = ""
+    for r in range(max_scan_rows):
+        full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
+
+    # MSDS 過濾
+    is_msds_table = False
+    if any(k in full_header_text for k in MSDS_HEADER_KEYWORDS) and "result" not in full_header_text:
+        is_msds_table = True
+
+    for r_idx in range(max_scan_rows):
+        row = table[r_idx]
+        for c_idx, cell in enumerate(row):
+            txt = clean_text(cell).lower()
+            if not txt: continue
+            
+            if "test item" in txt or "tested item" in txt or "測試項目" in txt:
+                if item_idx == -1: item_idx = c_idx
+            if "mdl" in txt or "loq" in txt:
+                if mdl_idx == -1: mdl_idx = c_idx
+            if "limit" in txt or "限值" in txt:
+                if limit_idx == -1: limit_idx = c_idx
+
+            is_bad_header = any(bad in txt for bad in MSDS_HEADER_KEYWORDS)
+            
+            if not is_bad_header:
+                if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
+                    re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
+                    if "cas" not in txt and "method" not in txt and "limit" not in txt:
+                        if result_idx == -1: result_idx = c_idx
+
+    if result_idx == -1 and (company == "SGS" or company == "CTIC"):
+        if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
+            result_idx = mdl_idx + 1
+    
+    is_reference_table = False
+    if is_msds_table: 
+        is_reference_table = True
+    elif result_idx == -1:
+        if "restricted substances" in full_header_text or "group name" in full_header_text or "substance name" in full_header_text:
+            is_reference_table = True
+        if company == "INTERTEK" and "limits" in full_header_text:
+            is_reference_table = True
+        if item_idx == -1:
+            is_reference_table = True
+
+    return item_idx, result_idx, is_reference_table
+
+# --- 4. 核心：文字模式 ---
+
+def parse_text_lines(text, data_pool, file_group_data, filename, company, targets=None):
+    lines = text.split('\n')
+    for line in lines:
+        line_clean = clean_text(line)
+        if not line_clean: continue
+        
+        # MSDS 過濾
+        if any(bad in line_clean.lower() for bad in MSDS_HEADER_KEYWORDS): continue
+
+        matched_simple = None
+        for key, keywords in SIMPLE_KEYWORDS.items():
+            if targets and key not in targets: continue
+            for kw in keywords:
+                if kw in line_clean and "test item" not in line_clean.lower():
+                    matched_simple = key
+                    break
+            if matched_simple: break
+        
+        matched_group = None
+        if not matched_simple:
+            for group_key, keywords in GROUP_KEYWORDS.items():
+                if targets and group_key not in targets: continue
+                for kw in keywords:
+                    if kw in line_clean:
+                        matched_group = group_key
+                        break
+                if matched_group: break
+        
+        if matched_simple or matched_group:
+            parts = line_clean.split()
+            if len(parts) < 2: continue
+            
+            found_val = ""
+            for part in reversed(parts):
+                p_lower = part.lower()
+                if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---"]: continue
+                if "nd" in p_lower:
+                    found_val = "N.D."
+                    break
+                if re.match(r"^\d+.*$", part): 
+                    val_check = part.replace("▲", "").replace("△", "")
+                    try:
+                        f = float(val_check)
+                        if f not in [100.0, 1000.0, 50.0]:
+                            found_val = part
                             break
+                    except: pass
+            
+            if found_val:
+                priority = parse_value_priority(found_val)
+                if priority[0] == 0: continue
+                if matched_simple:
+                    data_pool[matched_simple].append({"priority": priority, "filename": filename})
+                elif matched_group:
+                    file_group_data[matched_group].append(priority)
+
+# --- 主程式 ---
+
+def process_files(files):
+    data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
+    all_file_valid_dates = [] 
+    
+    progress_bar = st.progress(0)
+    
+    for i, file in enumerate(files):
+        filename = file.name
+        file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
+        
+        try:
+            with pdfplumber.open(file) as pdf:
+                start_page_idx = find_report_start_page(pdf)
                 
-                # === Step 2: 如果沒找到 Hg 錨點，使用表頭消去法 (備用) ===
-                header_result_idx = -1
-                header_row_idx = -1
-                if anchor_col_idx == -1:
-                    ignore_keywords = ['limit', 'unit', 'mdl', 'loq', 'test item', 'test method', 'cas', '限值', '單位', '測試項目', '方法', 'rl']
-                    for r_idx, row in enumerate(table[:5]):
-                        row_text = [str(cell).lower() for cell in row if cell]
-                        row_str_lower = " ".join(row_text)
-                        if any(x in row_str_lower for x in ['test item', 'unit', 'mdl', 'limit', '測試項目', '單位']):
-                            header_row_idx = r_idx
-                            # 策略: 排除壞欄位，取剩下的最右邊
-                            valid_candidates = []
-                            for c_idx, cell in enumerate(row):
-                                if not cell: continue
-                                c_text = str(cell).lower().strip()
-                                is_ignored = any(kw in c_text for kw in ignore_keywords)
-                                if not is_ignored:
-                                    valid_candidates.append(c_idx)
-                            if valid_candidates:
-                                header_result_idx = valid_candidates[-1]
-                            break
+                company = "OTHERS"
+                if len(pdf.pages) > start_page_idx:
+                    first_relevant_page_text = pdf.pages[start_page_idx].extract_text() or ""
+                    company = identify_company(first_relevant_page_text)
+                    if check_pfas_in_summary(first_relevant_page_text):
+                        data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
-                # === Step 3: 開始抓取數據 ===
-                start_row = header_row_idx + 1 if header_row_idx != -1 else 0
+                # v36.5: 日期提取 (萬能格式 + 積分)
+                file_dates_candidates = []
+                full_text_content = "" 
                 
-                for row in table[start_row:]:
-                    row_clean = [str(c) for c in row if c]
-                    row_str = " ".join(row_clean).replace("\n", " ")
+                for p_idx in range(start_page_idx, len(pdf.pages)):
+                    page = pdf.pages[p_idx]
+                    page_txt = page.extract_text() or ""
+                    full_text_content += page_txt + "\n"
+                    
+                    # 只在報告前段找日期 (避免抓到後面的附錄日期)
+                    if p_idx < start_page_idx + 5:
+                        dates = extract_dates_v36_5(page_txt)
+                        file_dates_candidates.extend(dates)
+                
+                if file_dates_candidates:
+                    # 篩選正分日期 (排除 -100 的毒藥日期)
+                    # 排序: 分數高優先 -> 日期晚優先
+                    # 這樣 Report Date (100分) 會贏過 Approved Date (-100分)
+                    valid_candidates = [d for d in file_dates_candidates if d[0] > -50]
+                    
+                    if valid_candidates:
+                        best_date = sorted(valid_candidates, key=lambda x: (x[0], x[1]), reverse=True)[0]
+                        all_file_valid_dates.append(best_date[1])
+                    # 如果只有負分日期(極少見)，則退而求其次(不建議，這裡保持嚴格)
 
-                    # 排除雜訊行
-                    if re.search(r"(?i)(Perfluorooctanoic\s*Acid|全氟辛酸)", row_str) and "PFOA" not in SGS_OPTIMIZED_MAP: continue
-                    if "PFAS" in row_str and not result['PFAS']: result['PFAS'] = "REPORT"
-                    
-                    # A. 識別測項
-                    matched_key = None
-                    for key, keywords in SGS_OPTIMIZED_MAP.items():
-                        if any(kw.lower() in row_str.lower() for kw in keywords):
-                            if key == "PFOS" and re.search(r"(?i)(Total|PFOSF|Derivative|总和|衍生物)", row_str): continue
-                            if key in ['F', 'Cl', 'Br', 'I'] and not re.search(r"\((F|Cl|Br|I)-?\)", row_str): continue
-                            matched_key = key
-                            break
-                    
-                    is_pbb = re.search(PBB_SUBITEMS, row_str)
-                    is_pbde = re.search(PBDE_SUBITEMS, row_str)
+                # 2. 引擎 A: 表格模式
+                for p_idx in range(start_page_idx, len(pdf.pages)):
+                    page = pdf.pages[p_idx]
+                    tables = page.extract_tables()
+                    for table in tables:
+                        if not table or len(table) < 2: continue
+                        
+                        item_idx, result_idx, is_skip_table = identify_columns_by_company(table, company)
+                        if is_skip_table: continue 
 
-                    if not matched_key and not is_pbb and not is_pbde:
-                        continue
-                    
-                    # B. 抓取數值 (優先使用 Anchor)
-                    target_val_str = ""
+                        for row_idx, row in enumerate(table):
+                            clean_row = [clean_text(cell) for cell in row]
+                            row_txt = "".join(clean_row).lower()
+                            if "test item" in row_txt or "result" in row_txt or "restricted" in row_txt: continue
+                            if not any(clean_row): continue
+                            
+                            target_item_col = item_idx if item_idx != -1 else 0
+                            if target_item_col >= len(clean_row): continue
+                            item_name = clean_row[target_item_col]
+                            
+                            if "pvc" in item_name.lower() or "polyvinyl" in item_name.lower(): continue
 
-                    if anchor_col_idx != -1 and anchor_col_idx < len(row):
-                        # [強鎖定] 有 Hg 錨點，只讀這一欄！
-                        target_val_str = str(row[anchor_col_idx])
-                    
-                    elif header_result_idx != -1 and header_result_idx < len(row):
-                        # [次選] 使用表頭定位
-                        target_val_str = str(row[header_result_idx])
-                    
-                    else:
-                        # [最後手段] 倒著找 (但避開 CAS 和 單位)
-                        # 這裡加入防呆：如果內容是 CAS 格式 (d-d-d) 或 單位，跳過
-                        for cell in reversed(row):
-                            if cell:
-                                cell_s = str(cell).strip()
-                                # 檢查是否為 CAS 號碼 (簡單版: 數字-數字-數字)
-                                if re.search(r"\d+-\d{2}-\d", cell_s): continue 
-                                if cell_s.lower() in ["mg/kg", "ppm", "%"]: continue
-                                target_val_str = cell_s
-                                break
-                    
-                    cleaned_val = clean_value(target_val_str)
+                            result = ""
+                            if result_idx != -1 and result_idx < len(clean_row):
+                                result = clean_row[result_idx]
+                            
+                            if not result:
+                                for cell in reversed(clean_row):
+                                    c_lower = cell.lower()
+                                    if not cell: continue
+                                    if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
+                                        result = cell
+                                        break
+                                    if re.search(r"^\d+(\.\d+)?", cell):
+                                        if "1000" in cell: continue 
+                                        result = cell
+                                        break
+                            
+                            priority = parse_value_priority(result)
+                            if priority[0] == 0: continue 
 
-                    # C. 存入結果
-                    if matched_key:
-                        # 對於 Pb/Cd 等重金屬，如果已經有值且不是 N.D.，通常不覆蓋
-                        # 但如果我們用了 Anchor，準確度高，可以直接信任
-                        if result.get(matched_key) is None or result.get(matched_key) == "N.D.":
-                             if cleaned_val is not None:
-                                result[matched_key] = cleaned_val
-                    
-                    elif is_pbb:
-                        pbb_found = True
-                        if isinstance(cleaned_val, (int, float)): pbb_sum += cleaned_val
-                    
-                    elif is_pbde:
-                        pbde_found = True
-                        if isinstance(cleaned_val, (int, float)): pbde_sum += cleaned_val
+                            for target_key, keywords in SIMPLE_KEYWORDS.items():
+                                for kw in keywords:
+                                    if kw.lower() in item_name.lower():
+                                        if target_key == "PFOS" and "related" in item_name.lower(): continue 
+                                        data_pool[target_key].append({"priority": priority, "filename": filename})
+                                        break
+
+                            for group_key, keywords in GROUP_KEYWORDS.items():
+                                for kw in keywords:
+                                    if kw.lower() in item_name.lower():
+                                        file_group_data[group_key].append(priority)
+                                        break
+                
+                # 3. 引擎 B: 文字模式
+                missing_targets = []
+                pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
+                if not pb_data: missing_targets.append("Pb")
+                if not file_group_data["PBB"]: missing_targets.append("PBB")
+                if not file_group_data["PBDE"]: missing_targets.append("PBDE")
+                
+                # SGS 救援 + CTI 救援 (若表格完全抓不到)
+                if missing_targets:
+                    parse_text_lines(full_text_content, data_pool, file_group_data, filename, company, targets=missing_targets)
+
+            # 檔案結算
+            for group_key, values in file_group_data.items():
+                if values:
+                    best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
+                    data_pool[group_key].append({
+                        "priority": best_in_file,
+                        "filename": filename
+                    })
+
+        except Exception as e:
+            st.warning(f"檔案 {filename} 解析異常: {e}")
+        
+        progress_bar.progress((i + 1) / len(files))
+
+    # 聚合
+    final_row = {}
+    for key in OUTPUT_COLUMNS:
+        if key in ["日期", "檔案名稱"]: continue
+        candidates = data_pool.get(key, [])
+        if not candidates:
+            final_row[key] = "" 
+            continue
+        best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
+        final_row[key] = best_record['priority'][2]
+
+    # 日期：取所有檔案中「最佳日期」裡「最晚」的一個
+    final_date_str = ""
+    if all_file_valid_dates:
+        latest_date = max(all_file_valid_dates)
+        final_date_str = latest_date.strftime("%Y/%m/%d")
     
-    # 處理總和項
-    if "PFAS" in first_page_text: result["PFAS"] = "REPORT"
-    result["PBBs"] = pbb_sum if pbb_found and pbb_sum > 0 else "N.D."
-    result["PBDEs"] = pbde_sum if pbde_found and pbde_sum > 0 else "N.D."
-    return result
-
-# ==========================================
-# 4. CTI/Intertek 解析模組 (維持原樣)
-# ==========================================
-def parse_cti(pdf_obj, full_text, first_page_text):
-    result = {k: None for k in TARGET_ITEMS if k not in ['FILENAME', 'DATE']}
-    result['PFAS'] = ""
-    date_match = re.search(r"(?i)(?:Date|日期)\s*[:：]?\s*(\d{4}[-./年]\s?\d{1,2}[-./月]\s?\d{1,2}|\w{3}\.\s*\d{1,2},\s*\d{4})", first_page_text)
-    result['DATE'] = clean_date_str(date_match.group(1)) if date_match else ""
-    pbb_sum = 0; pbde_sum = 0; pbb_found = False; pbde_found = False
-    with pdfplumber.open(pdf_obj) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                if not table: continue
-                header = table[0]
-                res_idx = -1
-                for i, col in enumerate(header):
-                    if col and re.search(r"(?i)(Result|结果)", str(col)):
-                        res_idx = i; break
-                if res_idx == -1:
-                    for i, col in enumerate(header):
-                        if col and re.search(r"(?i)(MDL|LOQ|RL|Limit)", str(col)):
-                            res_idx = i - 1 if i > 0 else i + 1; break
-                if res_idx == -1: continue
-                for row_idx, row in enumerate(table[1:]):
-                    if len(row) <= res_idx: continue
-                    row_str = " ".join([str(c) for c in row if c]).replace("\n", " ")
-                    if re.search(r"(?i)(PFOA|Perfluorooctanoic\s*Acid|全氟辛酸)", row_str): continue
-                    if "PFAS" in row_str and not result['PFAS']: result['PFAS'] = "REPORT"
-                    val = clean_value(row[res_idx])
-                    for pat, key in UNIFIED_REGEX_MAP.items():
-                        if re.search(pat, row_str):
-                            if key == "PFOS" and re.search(r"(?i)(Total|PFOSF|Derivative|总和|衍生物)", row_str): continue
-                            if val is not None:
-                                current_val = result.get(key)
-                                if current_val is None or current_val == "N.D.": result[key] = val
-                                elif isinstance(val, (int, float)) and isinstance(current_val, (int, float)):
-                                    result[key] = max(val, current_val)
-                            break
-                    if re.search(PBB_SUBITEMS, row_str):
-                        pbb_found = True; pbb_sum += val if isinstance(val, (int, float)) else 0
-                    if re.search(PBDE_SUBITEMS, row_str):
-                        pbde_found = True; pbde_sum += val if isinstance(val, (int, float)) else 0
-    if "PFAS" in first_page_text: result["PFAS"] = "REPORT"
-    result["PBBs"] = pbb_sum if pbb_found and pbb_sum > 0 else "N.D."
-    result["PBDEs"] = pbde_sum if pbde_found and pbde_sum > 0 else "N.D."
-    return result
-
-def parse_intertek(pdf_obj, full_text, first_page_text):
-    result = {k: None for k in TARGET_ITEMS if k not in ['FILENAME', 'DATE']}
-    result['PFAS'] = ""
-    result['DATE'] = ""
-    lines = first_page_text.split('\n')
-    date_pat = r"(?i)(?:Date|Issue Date| 발행일자 )\s*[:：]?\s*([A-Za-z]{3}\s+\d{1,2},?\s*\d{4}|\d{4}[.\s]+\d{1,2}[.\s]+\d{1,2})"
-    for line in lines[:25]:
-        match = re.search(date_pat, line)
-        if match:
-            result['DATE'] = clean_date_str(match.group(1))
-            break
-    pbb_sum = 0; pbde_sum = 0; pbb_found = False; pbde_found = False
-    with pdfplumber.open(pdf_obj) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                if not table: continue
-                header = [str(c).replace("\n", " ") for c in table[0]]
-                mdl_idx = -1
-                for i, col in enumerate(header):
-                    if col and re.search(r"(?i)(MDL|LOQ|Detection| 검출한계 )", str(col)):
-                        mdl_idx = i; break
-                if mdl_idx == -1: continue
-                res_idx = -1
-                if len(table) > 1:
-                    row1 = table[1]
-                    left_val = str(row1[mdl_idx-1]) if mdl_idx > 0 else ""
-                    right_val = str(row1[mdl_idx+1]) if mdl_idx + 1 < len(row1) else ""
-                    if re.search(r"(?i)(N\.?D|Negative|<)", left_val): res_idx = mdl_idx - 1
-                    elif re.search(r"(?i)(N\.?D|Negative|<)", right_val): res_idx = mdl_idx + 1
-                    elif mdl_idx + 1 < len(header) and re.search(r"(?i)(Result| 결과 )", str(header[mdl_idx+1])): res_idx = mdl_idx + 1
-                    elif mdl_idx - 1 >= 0 and re.search(r"(?i)(Result|结果)", str(header[mdl_idx-1])): res_idx = mdl_idx - 1
-                if res_idx == -1: continue
-                for row in table[1:]:
-                    if len(row) <= res_idx: continue
-                    row_str = " ".join([str(c) for c in row if c]).replace("\n", " ")
-                    val = clean_value(row[res_idx])
-                    if re.search(r"(?i)(PFOA|Perfluorooctanoic\s*Acid|全氟辛酸)", row_str): continue
-                    if "PFAS" in row_str and not result['PFAS']: result['PFAS'] = "REPORT"
-                    for pat, key in UNIFIED_REGEX_MAP.items():
-                        if re.search(pat, row_str):
-                            if key == "PFOS" and re.search(r"(?i)(Total|PFOSF|Derivative|总和|衍生物)", row_str): continue
-                            if val is not None:
-                                current_val = result.get(key)
-                                if current_val is None or current_val == "N.D.": result[key] = val
-                                elif isinstance(val, (int, float)) and isinstance(current_val, (int, float)):
-                                    result[key] = max(val, current_val)
-                            break
-                    if re.search(PBB_SUBITEMS, row_str):
-                        pbb_found = True; pbb_sum += val if isinstance(val, (int, float)) else 0
-                    if re.search(PBDE_SUBITEMS, row_str):
-                        pbde_found = True; pbde_sum += val if isinstance(val, (int, float)) else 0
-    if "PFAS" in first_page_text: result["PFAS"] = "REPORT"
-    result["PBBs"] = pbb_sum if pbb_found and pbb_sum > 0 else "N.D."
-    result["PBDEs"] = pbde_sum if pbde_found and pbde_sum > 0 else "N.D."
-    return result
-
-# ==========================================
-# 5. 主程式
-# ==========================================
-def identify_vendor(first_page_text):
-    text = first_page_text.lower()
-    if "intertek" in text: return "INTERTEK"
-    if "cti" in text or "华测" in text: return "CTI"
-    if "sgs" in text: return "SGS"
-    return "UNKNOWN"
-
-def main():
-    st.set_page_config(page_title="化學報告自動彙整系統 v7.1 (Hg Anchor)", layout="wide")
-    st.title("🧪 化學測試報告自動彙整系統 v7.1")
-
-    st.markdown("""
-    **SGS 專屬修正說明 (Hg 錨點定位版)：**
-    1. **Hg 錨點鎖定：** 優先尋找 Mercury (Hg) 行的 "N.D." 位置，鎖定該欄位讀取其他金屬，防止誤抓 Limit (1000)。
-    2. **CAS/Limit 排除：** 若無 Hg (如鹵素測試)，使用表頭消去法 + 內容過濾，自動避開 CAS No. 和 Limit 欄位。
-    3. **日期全能搜尋：** 支援中文日期與各種英文日期格式。
-    """)
+    final_row["日期"] = final_date_str
     
-    uploaded_files = st.file_uploader("請上傳 PDF 報告 (支援多檔)", type="pdf", accept_multiple_files=True)
+    pb_candidates = data_pool.get("Pb", [])
+    if pb_candidates:
+        best_pb = sorted(pb_candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
+        final_row["檔案名稱"] = best_pb['filename']
+    else:
+        final_row["檔案名稱"] = files[0].name if files else ""
 
-    if uploaded_files:
-        if st.button("開始分析"):
-            valid_results = []
-            bucket_unknown = []
-            bucket_error = []
+    return [final_row]
 
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+# --- 介面 ---
+st.set_page_config(page_title="SGS 報告聚合工具 v36.5", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v36.5 最終修正版)")
+st.info("💡 v36.5：結合 v34 的數據穩定性 與 v56 的萬能日期清洗邏輯。能精準抓取 CTI/SGS 報告日期，同時完美避開 Approved/Testing Period 干擾。")
 
-            for i, file in enumerate(uploaded_files):
-                status_text.text(f"正在處理: {file.name}...")
-                try:
-                    with pdfplumber.open(file) as pdf:
-                        if len(pdf.pages) == 0:
-                            bucket_error.append(file.name)
-                            continue
-                        first_page_text = pdf.pages[0].extract_text()
-                        if not first_page_text:
-                            bucket_error.append(f"{file.name} (第一頁無法讀取)")
-                            continue
+uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
-                        full_text = ""
-                        for page in pdf.pages:
-                            txt = page.extract_text()
-                            if txt: full_text += txt + "\n"
+if uploaded_files:
+    if st.button("🔄 重新執行"): st.rerun()
 
-                        vendor = identify_vendor(first_page_text)
-                        data = None
+    try:
+        result_data = process_files(uploaded_files)
+        df = pd.DataFrame(result_data)
+        for col in OUTPUT_COLUMNS:
+            if col not in df.columns: df[col] = ""
+        df = df[OUTPUT_COLUMNS]
 
-                        if vendor == "SGS":
-                            data = parse_sgs(file, full_text, first_page_text)
-                        elif vendor == "CTI":
-                            data = parse_cti(file, full_text, first_page_text)
-                        elif vendor == "INTERTEK":
-                            data = parse_intertek(file, full_text, first_page_text)
-                        else:
-                            bucket_unknown.append(file.name)
-                            continue
+        st.success("✅ 處理完成！")
+        st.dataframe(df)
 
-                        if data:
-                            data['FILENAME'] = file.name
-                            valid_results.append(data)
-                        else:
-                            bucket_error.append(f"{file.name} (解析失敗)")
-
-                except Exception as e:
-                    bucket_error.append(f"{file.name} (錯誤: {str(e)})")
-
-                progress_bar.progress((i + 1) / len(uploaded_files))
-
-            status_text.text("分析完成！")
-
-            if valid_results:
-                df_final = pd.DataFrame(valid_results)
-                cols = ["FILENAME", "DATE"] + [c for c in TARGET_ITEMS if c not in ["FILENAME", "DATE"]]
-                available_cols = [c for c in cols if c in df_final.columns]
-                df_final = df_final[available_cols]
-
-                st.success(f" ✅  成功處理 {len(valid_results)} 份報告：")
-                st.dataframe(df_final)
-
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df_final.to_excel(writer, index=False, sheet_name='Summary')
-                output.seek(0)
-
-                st.download_button(
-                    label=" 📥  下載 Excel",
-                    data=output,
-                    file_name=f"Report_Summary_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.warning("未提取到有效數據。")
-
-            if bucket_unknown or bucket_error:
-                st.divider()
-                st.subheader(" ⚠ ️ 異常報告")
-                if bucket_unknown:
-                    for name in bucket_unknown: st.write(f"- 🧪 未識別廠商: {name}")
-                if bucket_error:
-                    for name in bucket_error: st.write(f"-  🔴  錯誤: {name}")
-
-if __name__ == "__main__":
-    main()
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Summary')
+        
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v36.5.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        
+    except Exception as e:
+        st.error(f"系統錯誤: {e}")
