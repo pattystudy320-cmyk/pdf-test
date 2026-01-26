@@ -87,7 +87,7 @@ def clean_date_str(date_str):
     # 處理中文日期: 2024 年 04 月 01 日 -> 2024/04/01
     clean_str = clean_str.replace("年", "/").replace("月", "/").replace("日", "")
     
-    # 英文月份轉換
+    # 英文月份轉換 (輔助 parser)
     for mon, digit in MONTH_MAP.items():
         if mon in clean_str:
             clean_str = clean_str.replace(mon, digit)
@@ -97,6 +97,7 @@ def clean_date_str(date_str):
     clean_str = re.split(r"(Page|頁)", clean_str, flags=re.IGNORECASE)[0]
     
     try:
+        # fuzzy=True 會自動跳過雜訊文字
         dt = parser.parse(clean_str, fuzzy=True)
         return dt.strftime("%Y/%m/%d")
     except:
@@ -107,7 +108,7 @@ def clean_value(val_str):
     val_str = str(val_str).strip()
 
     # 排除 MDL/Limit 等標題行
-    if val_str.lower() in ["mdl", "limit", "unit", "result", "loq", "requirement"]:
+    if val_str.lower() in ["mdl", "limit", "unit", "result", "loq", "requirement", "rl"]:
         return None
     # 處理 N.D. / Negative
     if re.search(r"(?i)(N\.?D\.?|Not Detected|<|Negative)", val_str):
@@ -124,51 +125,35 @@ def clean_value(val_str):
             pass
     return None
 
-def get_value_priority(val):
-    if isinstance(val, (int, float)): return (3, val)
-    if val in ["NEGATIVE", "POSITIVE"]: return (2, 0)
-    if val == "N.D.": return (1, 0)
-    return (0, 0)
-
 # ==========================================
-# 3. SGS 解析模組 (v6.6 最終修正版)
+# 3. SGS 解析模組 (v7.0 絕對鎖定版)
 # ==========================================
 def parse_sgs(pdf_obj, full_text, first_page_text):
     result = {k: None for k in SGS_OPTIMIZED_MAP.keys()}
     result['PFAS'] = ""
     result['DATE'] = ""
     
-    # --- 1. 日期抓取 (擴充版) ---
-    # 擴大掃描行數到 40，並增加中文與連字號格式支援
+    # --- 1. 日期抓取 (智慧特徵搜尋) ---
     lines = first_page_text.split('\n')
     for line in lines[:40]:
-        # 只要行內有 'Date' 或 '日期'，就嘗試解析
+        # 只要行內有 'Date' 或 '日期'，就啟動搜尋
         if re.search(r"(?i)(Date|日期)", line) and not re.search(r"(?i)(Received|Testing|Period|接收|周期)", line):
             
-            # 模式 A: 中文日期 (2024 年 04 月 01 日)
+            # 策略 A: 尋找英文月份關鍵字 (Jan, Feb...)
+            # 這能同時抓到 "04-Mar-2025" (日-月-年) 和 "Mar 01, 2024" (月-日-年)
+            match_en_month = re.search(r"(?i)(\d{1,2}[-.\s]*)?(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-.\s,]*(\d{1,2})?[-.\s,]*(\d{4})", line)
+            
+            # 策略 B: 尋找中文日期 (2024 年 04 月 01 日)
             match_chi = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", line)
             
-            # 模式 B: 連字號英文 (04-Mar-2025)
-            match_hyphen = re.search(r"(\d{1,2})\s*[-]\s*([A-Za-z]{3})\s*[-]\s*(\d{4})", line)
-            
-            # 模式 C: 標準混和 (Feb 27, 2025)
-            match_mixed = re.search(r"(?i)(\d{2}[-.\s][A-Za-z]{3}[-.\s]\d{4}|\d{2}\s[A-Za-z]{3}\s\d{4})", line)
-            
-            # 模式 D: 純英文逗號 (Feb 27, 2025)
-            match_en = re.search(r"(?i)([A-Za-z]{3}\s+\d{1,2},?\s*\d{4})", line)
-            
-            # 模式 E: 純數字斜線 (2025/02/27)
+            # 策略 C: 純數字 (2025/02/27)
             match_num = re.search(r"(\d{4}[-./]\s?\d{1,2}[-./]\s?\d{1,2})", line)
 
             found_date_str = None
-            if match_chi:
+            if match_en_month:
+                found_date_str = match_en_month.group(0)
+            elif match_chi:
                 found_date_str = f"{match_chi.group(1)}/{match_chi.group(2)}/{match_chi.group(3)}"
-            elif match_hyphen:
-                found_date_str = match_hyphen.group(0)
-            elif match_mixed:
-                found_date_str = match_mixed.group(0)
-            elif match_en:
-                found_date_str = match_en.group(0)
             elif match_num:
                 found_date_str = match_num.group(0)
             
@@ -176,7 +161,7 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                 result['DATE'] = clean_date_str(found_date_str)
                 break
     
-    # --- 2. 數據抓取 (欄位定位法 - 消去法優化) ---
+    # --- 2. 數據抓取 (絕對欄位鎖定法) ---
     pbb_sum = 0; pbde_sum = 0; pbb_found = False; pbde_found = False
 
     with pdfplumber.open(pdf_obj) as pdf:
@@ -190,7 +175,7 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                 result_col_idx = -1
 
                 # 排除欄位關鍵字 (小寫)
-                ignore_keywords = ['limit', 'unit', 'mdl', 'loq', 'test item', 'test method', 'cas', '限值', '單位', '測試項目', '方法']
+                ignore_keywords = ['limit', 'unit', 'mdl', 'loq', 'test item', 'test method', 'cas', '限值', '單位', '測試項目', '方法', 'rl']
 
                 # 先掃描表頭
                 for r_idx, row in enumerate(table[:5]):
@@ -201,16 +186,14 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                     if any(x in row_str_lower for x in ['test item', 'unit', 'mdl', 'limit', '測試項目', '單位']):
                         header_row_idx = r_idx
                         
-                        # 策略 1: 尋找明確標題 (Result, No.1, 結果)
-                        # 必須同時「包含結果關鍵字」且「不包含 Limit/Unit」
+                        # 策略 1: 尋找明確標題 (Result, No.1, 結果) - 且必須不是 Limit/Unit
                         for c_idx, cell in enumerate(row):
                             cell_str = str(cell).strip()
-                            if re.search(r"(?i)(Result|No\.|結果)", cell_str) and not re.search(r"(?i)(Limit|Unit)", cell_str):
+                            if re.search(r"(?i)(Result|No\.|結果)", cell_str) and not re.search(r"(?i)(Limit|Unit|MDL)", cell_str):
                                 result_col_idx = c_idx
                                 break
                         
                         # 策略 2 (新): 若找不到明確標題，使用「消去法」+「最右側原則」
-                        # 排除掉 Limit, Unit, MDL, Test Item 之後，最右邊的那個通常就是 A1/001/結果
                         if result_col_idx == -1:
                             valid_candidates = []
                             for c_idx, cell in enumerate(row):
@@ -251,13 +234,15 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                     if not matched_key and not is_pbb and not is_pbde:
                         continue
                     
-                    # B. 抓取數值 (使用欄位索引)
+                    # B. 抓取數值 (絕對鎖定邏輯)
                     target_val_str = ""
 
                     if result_col_idx != -1 and result_col_idx < len(row):
+                        # [嚴格執行] 既然確定了 result_col_idx，就只讀這一欄！
+                        # 絕對不讀其他欄位，防止抓到 Limit (1000)
                         target_val_str = str(row[result_col_idx])
                     else:
-                        # 備用：倒著找最後一個非空值 (避開單位和Limit)
+                        # 只有在完全找不到表頭定位時，才使用備用邏輯 (倒著找)
                         for cell in reversed(row):
                             if cell:
                                 cell_s = str(cell).strip()
@@ -269,9 +254,11 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
 
                     # C. 存入結果
                     if matched_key:
-                        current_val = result.get(matched_key)
-                        if get_value_priority(cleaned_val) > get_value_priority(current_val):
-                            result[matched_key] = cleaned_val
+                        # 這裡不再比較優先級，直接覆蓋/填入
+                        # 因為我們已經透過欄位鎖定確保抓到的是 Result
+                        if result.get(matched_key) is None or result.get(matched_key) == "N.D.":
+                             if cleaned_val is not None:
+                                result[matched_key] = cleaned_val
                     
                     elif is_pbb:
                         pbb_found = True
@@ -421,14 +408,14 @@ def identify_vendor(first_page_text):
     return "UNKNOWN"
 
 def main():
-    st.set_page_config(page_title="化學報告自動彙整系統 v6.6 (All Fixed)", layout="wide")
-    st.title("🧪 化學測試報告自動彙整系統 v6.6")
+    st.set_page_config(page_title="化學報告自動彙整系統 v7.0 (Strict Fix)", layout="wide")
+    st.title("🧪 化學測試報告自動彙整系統 v7.0")
 
     st.markdown("""
-    **SGS 專屬修正說明 (最終修正版)：**
-    1. **已修復 'list object' 錯誤：** 確保正確讀取 PDF 第一頁 [pdf.pages[0]]。
-    2. **日期格式增強：** 支援中文日期 (`2024 年...`)、連字號 (`04-Mar...`) 及混合格式。
-    3. **結果欄位智慧定位：** 採用「消去法」，自動排除 Limit/Unit/MDL，鎖定最右側結果欄 (解決 A1/001 標題問題)。
+    **SGS 專屬修正說明 (v7.0 絕對鎖定版)：**
+    1. **數值鎖定：** 採用「絕對欄位鎖定」機制。一旦確認結果欄位，**嚴格禁止**讀取其他欄位（如 Limit），徹底解決抓錯值問題。
+    2. **日期智慧搜尋：** 不再依賴固定格式，改為搜尋「英文月份」或「中文年月日」特徵，自動適應 `04-Mar-2025` 或 `Mar 01, 2024`。
+    3. **修復 list object 錯誤：** 確保正確讀取 PDF 第一頁 [pdf.pages[0]]。
     """)
     
     uploaded_files = st.file_uploader("請上傳 PDF 報告 (支援多檔)", type="pdf", accept_multiple_files=True)
@@ -451,7 +438,7 @@ def main():
                             bucket_error.append(file.name)
                             continue
 
-                        # [修正] 使用 [0] 讀取第一頁，修復 list object error
+                        # [修正] 使用 [0] 讀取第一頁
                         first_page_text = pdf.pages[0].extract_text()
 
                         if not first_page_text:
