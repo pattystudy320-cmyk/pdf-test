@@ -131,14 +131,14 @@ def get_value_priority(val):
     return (0, 0)
 
 # ==========================================
-# 3. SGS 解析模組 (v6.5 增強日期與欄位定位)
+# 3. SGS 解析模組 (v6.6 最終修正版)
 # ==========================================
 def parse_sgs(pdf_obj, full_text, first_page_text):
     result = {k: None for k in SGS_OPTIMIZED_MAP.keys()}
     result['PFAS'] = ""
     result['DATE'] = ""
     
-    # --- 1. 日期抓取 (v6.5 增強版) ---
+    # --- 1. 日期抓取 (擴充版) ---
     # 擴大掃描行數到 40，並增加中文與連字號格式支援
     lines = first_page_text.split('\n')
     for line in lines[:40]:
@@ -202,6 +202,7 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                         header_row_idx = r_idx
                         
                         # 策略 1: 尋找明確標題 (Result, No.1, 結果)
+                        # 必須同時「包含結果關鍵字」且「不包含 Limit/Unit」
                         for c_idx, cell in enumerate(row):
                             cell_str = str(cell).strip()
                             if re.search(r"(?i)(Result|No\.|結果)", cell_str) and not re.search(r"(?i)(Limit|Unit)", cell_str):
@@ -420,12 +421,12 @@ def identify_vendor(first_page_text):
     return "UNKNOWN"
 
 def main():
-    st.set_page_config(page_title="化學報告自動彙整系統 v6.5 (Date/Col Fix)", layout="wide")
-    st.title("🧪 化學測試報告自動彙整系統 v6.5")
+    st.set_page_config(page_title="化學報告自動彙整系統 v6.6 (All Fixed)", layout="wide")
+    st.title("🧪 化學測試報告自動彙整系統 v6.6")
 
     st.markdown("""
-    **SGS 專屬修正說明 (日期與欄位強化版)：**
-    1. **已修復 'list object' 錯誤：** 確保正確讀取 PDF 第一頁。
+    **SGS 專屬修正說明 (最終修正版)：**
+    1. **已修復 'list object' 錯誤：** 確保正確讀取 PDF 第一頁 [pdf.pages[0]]。
     2. **日期格式增強：** 支援中文日期 (`2024 年...`)、連字號 (`04-Mar...`) 及混合格式。
     3. **結果欄位智慧定位：** 採用「消去法」，自動排除 Limit/Unit/MDL，鎖定最右側結果欄 (解決 A1/001 標題問題)。
     """)
@@ -450,7 +451,7 @@ def main():
                             bucket_error.append(file.name)
                             continue
 
-                        # [修正] 使用 [0] 讀取第一頁
+                        # [修正] 使用 [0] 讀取第一頁，修復 list object error
                         first_page_text = pdf.pages[0].extract_text()
 
                         if not first_page_text:
