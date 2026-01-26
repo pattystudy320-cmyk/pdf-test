@@ -54,6 +54,10 @@ PFAS_SUMMARY_KEYWORDS = [
     "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
 ]
 
+MSDS_HEADER_KEYWORDS = [
+    "content", "composition", "concentration", "含量", "成分"
+]
+
 OUTPUT_COLUMNS = [
     "Pb", "Cd", "Hg", "Cr6+", "PBB", "PBDE", 
     "DEHP", "BBP", "DBP", "DIBP", 
@@ -67,33 +71,80 @@ def clean_text(text):
     if not text: return ""
     return str(text).replace('\n', ' ').strip()
 
-def extract_date_from_text(text):
-    # V34 原始日期邏輯：抓取像日期的格式，取最大值
-    text = clean_text(text)
-    patterns = [
-        r"(20\d{2})[/\.-](0?[1-9]|1[0-2])[/\.-](0?[1-9]|[12][0-9]|3[01])", 
-        r"(0?[1-9]|[12][0-9]|3[01])\s*[-/]\s*([a-zA-Z]{3})\s*[-/]\s*(20\d{2})", 
-        r"([a-zA-Z]{3})\.?\s+(0?[1-9]|[12][0-9]|3[01])[,\s]+\s*(20\d{2})" 
+def find_report_start_page(pdf):
+    for i in range(min(10, len(pdf.pages))):
+        text = (pdf.pages[i].extract_text() or "").lower()
+        if "test report" in text or "測試報告" in text:
+            return i
+    return 0
+
+def extract_dates_v58(text):
+    """
+    v58.0: 萬能清洗 (含中文) + 強化版積分過濾
+    """
+    lines = text.split('\n')
+    candidates = [] # (score, date_object)
+    
+    # 1. 權重設定
+    # 黃金關鍵字 (加分)
+    bonus_kw = ["report date", "issue date", "date:", "dated", "日期"]
+    
+    # 毒藥關鍵字 (扣分 - 包含中文常見干擾)
+    poison_kw = [
+        "approve", "approved", "approval", "approver", 
+        "check", "checked", "review", "reviewed",      
+        "receive", "received", "receipt",
+        "period", "testing period", "started", "from", "to ",
+        "承認", "核准", "檢驗", "收件", "接收", "有效", "expiry", "valid", "期間", "周期", "時間"
     ]
-    found_dates = []
-    for pattern in patterns:
-        matches = re.finditer(pattern, text, re.IGNORECASE)
-        for match in matches:
-            try:
-                dt = None
-                full_match = match.group(0)
-                clean_str = full_match.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
-                clean_str = " ".join(clean_str.split())
-                for fmt in ["%Y %m %d", "%d %b %Y", "%b %d %Y"]:
-                    try:
-                        dt = datetime.strptime(clean_str, fmt)
-                        break
-                    except: continue
-                if dt and 2000 <= dt.year <= 2030: 
-                    found_dates.append(dt)
-            except: continue
-    if found_dates: return max(found_dates)
-    return None
+
+    # 2. 萬能正則 (針對清洗過後的字串: 標點與中文單位都變空白)
+    # 支援: 2025 01 08 | 06 Jan 2025 | Jan 08 2025
+    pat_ymd = r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(0?[1-9]|[12][0-9]|3[01])"
+    pat_dmy = r"(0?[1-9]|[12][0-9]|3[01])\s+([a-zA-Z]{3,})\s+(20\d{2})"
+    pat_mdy = r"([a-zA-Z]{3,})\s+(0?[1-9]|[12][0-9]|3[01])\s+(20\d{2})"
+
+    for line in lines:
+        line_lower = line.lower()
+        
+        # --- A. 計算分數 ---
+        score = 1
+        if any(bad in line_lower for bad in poison_kw):
+            score = -100 # 毒藥：測試周期、接收時間、承認日期
+        elif any(good in line_lower for good in bonus_kw):
+            score = 100 # 黃金：日期、Report Date
+
+        # --- B. 暴力清洗 (包含中文 年/月/日) ---
+        # 將 . , - / 年 月 日 全部換成空白
+        clean_line = line.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
+        clean_line = clean_line.replace("年", " ").replace("月", " ").replace("日", " ")
+        
+        # 壓縮多餘空白 (變成 "2024 04 01")
+        clean_line = " ".join(clean_line.split())
+
+        # --- C. 嘗試匹配 ---
+        found_dt = None
+        for pat in [pat_ymd, pat_dmy, pat_mdy]:
+            matches = re.finditer(pat, clean_line, re.IGNORECASE)
+            for match in matches:
+                try:
+                    groups = match.groups()
+                    date_str = " ".join(groups)
+                    for fmt in ["%Y %m %d", "%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y"]:
+                        try:
+                            dt = datetime.strptime(date_str, fmt)
+                            if 2000 <= dt.year <= 2030:
+                                found_dt = dt
+                                break
+                        except: continue
+                    if found_dt: break
+                except: continue
+            if found_dt: break
+        
+        if found_dt:
+            candidates.append((score, found_dt))
+            
+    return candidates
 
 def is_suspicious_limit_value(val):
     try:
@@ -104,39 +155,29 @@ def is_suspicious_limit_value(val):
 
 def parse_value_priority(value_str):
     raw_val = clean_text(value_str)
-    
-    # 移除括號內的單位
     if "(" in raw_val and ")" in raw_val:
         if re.search(r"\(\d+\)", raw_val):
             raw_val = raw_val.split("(")[0].strip()
-    
     val = raw_val.replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
     
     if not val: return (0, 0, "")
     val_lower = val.lower()
-
     if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits"]: 
         return (0, 0, "")
-
     if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
     
-    # 數值檢查
     num_only_match = re.search(r"([\d\.]+)", val)
     if num_only_match:
         if is_suspicious_limit_value(num_only_match.group(1)): return (0, 0, "")
-
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower: return (1, 0, "N.D.")
     if "negative" in val_lower or "陰性" in val_lower: return (2, 0, "NEGATIVE")
     
-    # ★ V34 關鍵：支援帶符號的數值 (如 186802 ▲)
     num_match = re.search(r"^([\d\.]+)(.*)$", val)
     if num_match:
         try:
             number = float(num_match.group(1))
-            full_str = val 
-            return (3, number, full_str)
+            return (3, number, val)
         except: pass
-            
     return (0, 0, val)
 
 def check_pfas_in_summary(text):
@@ -150,6 +191,7 @@ def identify_company(text):
     if "sgs" in txt: return "SGS"
     if "intertek" in txt: return "INTERTEK"
     if "cti" in txt or "centre testing" in txt: return "CTI"
+    if "ctic" in txt: return "CTIC"
     return "OTHERS"
 
 # --- 3. 核心：表格識別 ---
@@ -165,38 +207,35 @@ def identify_columns_by_company(table, company):
     for r in range(max_scan_rows):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
 
+    is_msds_table = False
+    if any(k in full_header_text for k in MSDS_HEADER_KEYWORDS) and "result" not in full_header_text:
+        is_msds_table = True
+
     for r_idx in range(max_scan_rows):
         row = table[r_idx]
         for c_idx, cell in enumerate(row):
             txt = clean_text(cell).lower()
             if not txt: continue
-            
             if "test item" in txt or "tested item" in txt or "測試項目" in txt:
                 if item_idx == -1: item_idx = c_idx
             if "mdl" in txt or "loq" in txt:
                 if mdl_idx == -1: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt:
                 if limit_idx == -1: limit_idx = c_idx
-
-            if company == "SGS":
+            is_bad_header = any(bad in txt for bad in MSDS_HEADER_KEYWORDS)
+            if not is_bad_header:
                 if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
                     re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
                         if result_idx == -1: result_idx = c_idx
-            elif company == "INTERTEK":
-                if "result" in txt or "green" in txt or "submitted" in txt:
-                    if result_idx == -1: result_idx = c_idx
-            else: 
-                if "result" in txt or "結果" in txt or re.search(r"00[1-9]", txt):
-                    if result_idx == -1: result_idx = c_idx
 
-    if result_idx == -1:
-        if company == "SGS":
-            if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
-                result_idx = mdl_idx + 1
+    if result_idx == -1 and (company == "SGS" or company == "CTIC"):
+        if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
+            result_idx = mdl_idx + 1
     
     is_reference_table = False
-    if result_idx == -1:
+    if is_msds_table: is_reference_table = True
+    elif result_idx == -1:
         if "restricted substances" in full_header_text or "group name" in full_header_text or "substance name" in full_header_text:
             is_reference_table = True
         if company == "INTERTEK" and "limits" in full_header_text:
@@ -213,7 +252,8 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
     for line in lines:
         line_clean = clean_text(line)
         if not line_clean: continue
-        
+        if any(bad in line_clean.lower() for bad in MSDS_HEADER_KEYWORDS): continue
+
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
@@ -236,7 +276,6 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
         if matched_simple or matched_group:
             parts = line_clean.split()
             if len(parts) < 2: continue
-            
             found_val = ""
             for part in reversed(parts):
                 p_lower = part.lower()
@@ -265,12 +304,8 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
 
 def process_files(files):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
-    all_dates = []
-    
-    # ★ V34 特色: 全局 Pb 追蹤器，確保檔名顯示含有最大 Pb 值的檔案
-    global_tracker = {
-        "Pb": {"max_score": -1, "max_value": -1.0, "filename": ""}
-    }
+    all_file_valid_dates = [] 
+    global_tracker = {"Pb": {"max_score": -1, "max_value": -1.0, "filename": ""}}
     
     progress_bar = st.progress(0)
     
@@ -280,53 +315,51 @@ def process_files(files):
         
         try:
             with pdfplumber.open(file) as pdf:
-                file_dates = []
-                first_few_pages_text = ""
+                start_page_idx = find_report_start_page(pdf)
+                company = "OTHERS"
+                if len(pdf.pages) > start_page_idx:
+                    first_relevant_page_text = pdf.pages[start_page_idx].extract_text() or ""
+                    company = identify_company(first_relevant_page_text)
+                    if check_pfas_in_summary(first_relevant_page_text):
+                        data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
+
+                # v58.0: 日期提取
+                file_dates_candidates = []
                 full_text_content = "" 
-                
-                for p_idx in range(len(pdf.pages)):
+                for p_idx in range(start_page_idx, len(pdf.pages)):
                     page = pdf.pages[p_idx]
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
-                    
-                    if p_idx < 3:
-                        first_few_pages_text += page_txt
-                        d = extract_date_from_text(page_txt)
-                        if d: file_dates.append(d)
+                    if p_idx < start_page_idx + 5:
+                        dates = extract_dates_v58(page_txt)
+                        file_dates_candidates.extend(dates)
                 
-                if file_dates:
-                     all_dates.append((max(file_dates), filename))
-                
-                company = identify_company(first_few_pages_text)
-                
-                if check_pfas_in_summary(first_few_pages_text):
-                    data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
+                if file_dates_candidates:
+                    valid_candidates = [d for d in file_dates_candidates if d[0] > -50]
+                    if valid_candidates:
+                        best_date = sorted(valid_candidates, key=lambda x: (x[0], x[1]), reverse=True)[0]
+                        all_file_valid_dates.append(best_date[1])
 
                 # 2. 引擎 A: 表格模式
-                for page in pdf.pages:
+                for p_idx in range(start_page_idx, len(pdf.pages)):
+                    page = pdf.pages[p_idx]
                     tables = page.extract_tables()
                     for table in tables:
                         if not table or len(table) < 2: continue
-                        
                         item_idx, result_idx, is_skip_table = identify_columns_by_company(table, company)
                         if is_skip_table: continue 
-
                         for row_idx, row in enumerate(table):
                             clean_row = [clean_text(cell) for cell in row]
                             row_txt = "".join(clean_row).lower()
                             if "test item" in row_txt or "result" in row_txt or "restricted" in row_txt: continue
                             if not any(clean_row): continue
-                            
                             target_item_col = item_idx if item_idx != -1 else 0
                             if target_item_col >= len(clean_row): continue
                             item_name = clean_row[target_item_col]
-                            
                             if "pvc" in item_name.lower() or "polyvinyl" in item_name.lower(): continue
-
                             result = ""
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
-                            
                             if not result:
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
@@ -338,21 +371,15 @@ def process_files(files):
                                         if "1000" in cell: continue 
                                         result = cell
                                         break
-                            
                             priority = parse_value_priority(result)
                             if priority[0] == 0: continue 
-
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
                                 for kw in keywords:
                                     if kw.lower() in item_name.lower():
                                         if target_key == "PFOS" and "related" in item_name.lower(): continue 
-                                        
                                         data_pool[target_key].append({"priority": priority, "filename": filename})
-                                        
-                                        # 更新 Pb 全局追蹤器
                                         if target_key == "Pb":
-                                            score = priority[0]
-                                            val = priority[1]
+                                            score, val = priority[0], priority[1]
                                             if score > global_tracker["Pb"]["max_score"]:
                                                 global_tracker["Pb"]["max_score"] = score
                                                 global_tracker["Pb"]["max_value"] = val
@@ -361,22 +388,21 @@ def process_files(files):
                                                 global_tracker["Pb"]["max_value"] = val
                                                 global_tracker["Pb"]["filename"] = filename
                                         break
-
                             for group_key, keywords in GROUP_KEYWORDS.items():
                                 for kw in keywords:
                                     if kw.lower() in item_name.lower():
                                         file_group_data[group_key].append(priority)
                                         break
                 
-                # 3. 引擎 B: 文字模式 (V34 邏輯: SGS 且缺資料時啟動)
+                # 3. 引擎 B: 文字模式
                 missing_targets = []
                 pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
                 if not pb_data: missing_targets.append("Pb")
+                if not file_group_data["PBB"]: missing_targets.append("PBB")
+                if not file_group_data["PBDE"]: missing_targets.append("PBDE")
                 
-                if company == "SGS" and (missing_targets or not file_group_data["PBB"] or not file_group_data["PBDE"]):
+                if company == "SGS" and missing_targets:
                      parse_text_lines(full_text_content, data_pool, file_group_data, filename, company, targets=None)
-                     
-                     # 文字模式抓完後，再次更新 Pb 全局追蹤
                      for d in data_pool["Pb"]:
                          if d['filename'] == filename:
                              p = d['priority']
@@ -388,21 +414,15 @@ def process_files(files):
                                  global_tracker["Pb"]["max_value"] = p[1]
                                  global_tracker["Pb"]["filename"] = filename
 
-            # 檔案結算
             for group_key, values in file_group_data.items():
                 if values:
                     best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
-                    data_pool[group_key].append({
-                        "priority": best_in_file,
-                        "filename": filename
-                    })
+                    data_pool[group_key].append({"priority": best_in_file, "filename": filename})
 
         except Exception as e:
             st.warning(f"檔案 {filename} 解析異常: {e}")
-        
         progress_bar.progress((i + 1) / len(files))
 
-    # 聚合
     final_row = {}
     for key in OUTPUT_COLUMNS:
         if key in ["日期", "檔案名稱"]: continue
@@ -410,30 +430,27 @@ def process_files(files):
         if not candidates:
             final_row[key] = "" 
             continue
-        # 選出最好的結果
         best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
         final_row[key] = best_record['priority'][2]
 
-    # 日期
     final_date_str = ""
-    if all_dates:
-        latest_date_record = sorted(all_dates, key=lambda x: x[0], reverse=True)[0]
-        final_date_str = latest_date_record[0].strftime("%Y/%m/%d")
+    if all_file_valid_dates:
+        latest_date = max(all_file_valid_dates)
+        final_date_str = latest_date.strftime("%Y/%m/%d")
     
     final_row["日期"] = final_date_str
     
-    # 檔名使用 Pb 的來源檔名 (V34 特色)
     if global_tracker["Pb"]["filename"]:
         final_row["檔案名稱"] = global_tracker["Pb"]["filename"]
     else:
-        final_row["檔案名稱"] = latest_date_record[1] if all_dates else (files[0].name if files else "")
+        final_row["檔案名稱"] = files[0].name if files else ""
 
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v34.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v34.0 回歸穩定版)")
-st.info("💡 v34.0：回復到最穩定的 SGS 版本，能抓取 ▲ 特殊符號數值，並確保 Pb 最大值對應正確的檔案名稱。")
+st.set_page_config(page_title="SGS 報告聚合工具 v58.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v58.0 中文日期強化版)")
+st.info("💡 v58.0：結合 V34 (數值穩定) 與 V57 (日期邏輯)，並針對中文報告新增「接收/周期」過濾，解決 SGS 中文報告日期抓錯問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -454,7 +471,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v34.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v58.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")
