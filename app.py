@@ -6,7 +6,7 @@ import io
 from dateutil import parser
 
 # ==========================================
-# 0. 強制清除快取 (避免舊資料干擾)
+# 0. 強制清除快取
 # ==========================================
 try:
     if hasattr(st, 'cache_data'):
@@ -28,7 +28,7 @@ TARGET_ITEMS = [
     "PFOS", "PFAS", "DATE", "FILENAME"
 ]
 
-# --- SGS 專用字典 (針對 SGS 報告格式優化) ---
+# --- SGS 專用字典 (優化版) ---
 SGS_OPTIMIZED_MAP = {
     'Pb': ['Lead', 'Pb', '鉛', '铅'],
     'Cd': ['Cadmium', 'Cd', '鎘', '镉'],
@@ -48,7 +48,7 @@ SGS_OPTIMIZED_MAP = {
     'PFAS': ['PFAS']
 }
 
-# --- CTI/Intertek 通用字典 (Regex版 - 維持原樣) ---
+# --- CTI/Intertek 通用字典 (維持原樣) ---
 UNIFIED_REGEX_MAP = {
     r"(?i)\b(Lead|Pb|铅)\b": "Pb",
     r"(?i)\b(Cadmium|Cd|镉)\b": "Cd",
@@ -128,7 +128,7 @@ def get_value_priority(val):
     return (0, 0)
 
 # ==========================================
-# 3. SGS 解析模組 (v6.1 欄位定位 + 修復版)
+# 3. SGS 解析模組 (v6.2 語法修復 + 欄位定位版)
 # ==========================================
 def parse_sgs(pdf_obj, full_text, first_page_text):
     result = {k: None for k in SGS_OPTIMIZED_MAP.keys()}
@@ -172,6 +172,7 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                     row_text = [str(cell).lower() for cell in row if cell]
                     row_str_lower = " ".join(row_text)
                     
+                    # 判斷是否為表頭列
                     if any(x in row_str_lower for x in ['test item', 'unit', 'mdl', 'limit', '測試項目', '單位']):
                         header_row_idx = r_idx
                         # 尋找明確標題 (Result, No.1, 001)
@@ -181,6 +182,7 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                                 result_col_idx = c_idx
                         
                         # 若找不到明確標題，使用「最右邊非空欄位」策略 (針對 A1, A2 這種 Sample ID)
+                        # 這對您的報告 SHAEC25002368201 非常重要，因為標題是 "A1"
                         if result_col_idx == -1:
                             for c_idx in range(len(row)-1, -1, -1):
                                 if row[c_idx]:
@@ -392,13 +394,13 @@ def identify_vendor(first_page_text):
     return "UNKNOWN"
 
 def main():
-    st.set_page_config(page_title="化學報告自動彙整系統 v6.1 (Fix)", layout="wide")
-    st.title("🧪 化學測試報告自動彙整系統 v6.1")
+    st.set_page_config(page_title="化學報告自動彙整系統 v6.2 (Final)", layout="wide")
+    st.title("🧪 化學測試報告自動彙整系統 v6.2")
     
     st.markdown("""
     **SGS 專屬修正 (欄位定位 + 錯誤修復)：**
-    - 已修復 'list object' 錯誤。
-    - 採用欄位定位法，正確抓取 SGS 報告右側結果，避免誤判 Limit/MDL。
+    - **語法修復：** 已加入 `` 索引，解決 'list object' 錯誤。
+    - **邏輯優化：** 採用欄位定位法，正確抓取 SGS 右側結果 (ND)，跳過中間的 Limit/MDL。
     """)
 
     uploaded_files = st.file_uploader("請上傳 PDF 報告 (支援多檔)", type="pdf", accept_multiple_files=True)
@@ -416,12 +418,14 @@ def main():
                 status_text.text(f"正在處理: {file.name}...")
                 try:
                     with pdfplumber.open(file) as pdf:
+                        # [安全性檢查] 確保檔案有頁面
                         if len(pdf.pages) == 0:
                             bucket_error.append(file.name)
                             continue
                         
-                        # [重要修正] 這裡必須指定 pages 來讀取第一頁，不能直接讀 pages 清單
+                        # [重要修正] 這裡加上  指定讀取第一頁
                         first_page_text = pdf.pages.extract_text()
+                        
                         if not first_page_text:
                             bucket_error.append(f"{file.name} (第一頁無法讀取)")
                             continue
