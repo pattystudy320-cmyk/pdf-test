@@ -6,7 +6,7 @@ import io
 from dateutil import parser
 
 # ==========================================
-# 0. 強制清除快取 (最優先執行)
+# 0. 強制清除快取 (避免舊資料干擾)
 # ==========================================
 try:
     if hasattr(st, 'cache_data'):
@@ -102,7 +102,7 @@ def clean_value(val_str):
     val_str = str(val_str).strip()
     
     # 排除 MDL/Limit 等標題行
-    if val_str.lower() in ["mdl", "limit", "unit", "result", "loq"]:
+    if val_str.lower() in ["mdl", "limit", "unit", "result", "loq", "requirement"]:
         return None
 
     # 處理 N.D. / Negative
@@ -116,7 +116,7 @@ def clean_value(val_str):
     nums = re.findall(r"\d+\.?\d*", val_str)
     if nums:
         try:
-            return float(nums)
+            return float(nums) # 取第一個找到的數字
         except:
             pass
     return None
@@ -128,24 +128,20 @@ def get_value_priority(val):
     return (0, 0)
 
 # ==========================================
-# 3. SGS 解析模組 (v6.0 欄位定位修正版)
-# 修正重點：改用欄位索引 (Column Index) 抓取數值，避免抓到 Limit/MDL
+# 3. SGS 解析模組 (v6.1 欄位定位 + 修復版)
 # ==========================================
 def parse_sgs(pdf_obj, full_text, first_page_text):
     result = {k: None for k in SGS_OPTIMIZED_MAP.keys()}
     result['PFAS'] = ""
     result['DATE'] = ""
 
-    # --- 1. 日期抓取 (擴充支援格式) ---
-    # 支援格式: "Date: 06-Jan-2025", "Date: 03 Mar 2023", "Date: Feb 27, 2025"
+    # --- 1. 日期抓取 ---
     lines = first_page_text.split('\n')
     for line in lines[:25]:
         if re.search(r"(?i)(Date|日期)", line) and not re.search(r"(?i)(Received|Testing|Period|接收|周期)", line):
-            # 格式 A: 06-Jan-2025 or 03 Mar 2023
+            # 格式: 06-Jan-2025, 03 Mar 2023, Feb 27, 2025, 2025/02/27
             match_mixed = re.search(r"(?i)(?:Date|日期)\s*[:：]?\s*(\d{2}[-.\s][A-Za-z]{3}[-.\s]\d{4}|\d{2}\s[A-Za-z]{3}\s\d{4})", line)
-            # 格式 B: Feb 27, 2025
             match_en = re.search(r"(?i)(?:Date|日期)\s*[:：]?\s*([A-Za-z]{3}\s+\d{1,2},?\s*\d{4})", line)
-            # 格式 C: 2025/02/27
             match_num = re.search(r"(?:Date|日期)\s*[:：]?\s*(\d{4}[-./年]\s?\d{1,2}[-./月]\s?\d{1,2})", line)
             
             if match_mixed:
@@ -158,7 +154,7 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                 result['DATE'] = clean_date_str(match_num.group(1))
                 break
 
-    # --- 2. 數據抓取 (改用欄位定位法) ---
+    # --- 2. 數據抓取 (欄位定位法) ---
     pbb_sum = 0; pbde_sum = 0; pbb_found = False; pbde_found = False
     
     with pdfplumber.open(pdf_obj) as pdf:
@@ -167,56 +163,47 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
             for table in tables:
                 if not table: continue
                 
-                # 尋找結果所在的欄位索引 (Result Column Index)
+                # 尋找結果所在的欄位索引
                 header_row_idx = -1
                 result_col_idx = -1
                 
                 # 先掃描表頭找出結果欄位的位置
-                for r_idx, row in enumerate(table[:5]): # 掃描前5列找表頭
+                for r_idx, row in enumerate(table[:5]): 
                     row_text = [str(cell).lower() for cell in row if cell]
                     row_str_lower = " ".join(row_text)
                     
-                    # 判斷是否為表頭列 (含有 Test Item, Unit, MDL 等關鍵字)
                     if any(x in row_str_lower for x in ['test item', 'unit', 'mdl', 'limit', '測試項目', '單位']):
                         header_row_idx = r_idx
-                        # 從右向左找結果欄 (避開 Limit/MDL)
-                        # 尋找像是 "No.1", "Result", "001" 的欄位
+                        # 尋找明確標題 (Result, No.1, 001)
                         for c_idx, cell in enumerate(row):
                             cell_str = str(cell).strip()
-                            # 常見結果標題: "Result", "No.1", "001", "結果"
                             if re.search(r"(?i)(Result|No\.|00\d|結果|No\.1)", cell_str):
                                 result_col_idx = c_idx
                         
-                        # 如果找不到明確標題，假設是最右邊「不是Limit/MDL/Unit」的欄位
+                        # 若找不到明確標題，使用「最右邊非空欄位」策略 (針對 A1, A2 這種 Sample ID)
                         if result_col_idx == -1:
-                            # 倒著找最後一個非空的欄位
                             for c_idx in range(len(row)-1, -1, -1):
                                 if row[c_idx]:
                                     result_col_idx = c_idx
                                     break
                         break
                 
-                # 開始遍歷數據列
+                # 遍歷數據列
                 start_row = header_row_idx + 1 if header_row_idx != -1 else 0
                 
                 for row in table[start_row:]:
-                    # 將整列轉為字串以進行項目識別
                     row_clean = [str(c) for c in row if c]
                     row_str = " ".join(row_clean).replace("\n", " ")
                     
                     # 排除 PFOA (若需排除)
                     if re.search(r"(?i)(Perfluorooctanoic\s*Acid|全氟辛酸)", row_str) and "PFOA" not in SGS_OPTIMIZED_MAP: continue
-                    
-                    # 標記 PFAS 報告類型
                     if "PFAS" in row_str and not result['PFAS']: result['PFAS'] = "REPORT"
 
-                    # A. 識別測項 (SGS 字典)
+                    # A. 識別測項
                     matched_key = None
                     for key, keywords in SGS_OPTIMIZED_MAP.items():
                         if any(kw.lower() in row_str.lower() for kw in keywords):
-                            # 排除 PFOS 的衍生物或總和字眼
                             if key == "PFOS" and re.search(r"(?i)(Total|PFOSF|Derivative|总和|衍生物)", row_str): continue
-                            # 鹵素排除非離子狀態
                             if key in ['F', 'Cl', 'Br', 'I'] and not re.search(r"\((F|Cl|Br|I)-?\)", row_str): continue
                             matched_key = key
                             break
@@ -227,30 +214,25 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                     if not matched_key and not is_pbb and not is_pbde:
                         continue
 
-                    # B. 抓取數值 (使用欄位定位法，不再掃描整行)
+                    # B. 抓取數值 (使用欄位索引)
                     target_val_str = ""
                     
-                    # 如果有明確的結果欄，直接取該欄
                     if result_col_idx != -1 and result_col_idx < len(row):
                         target_val_str = str(row[result_col_idx])
                     else:
-                        # 備用邏輯：取最右邊看起來像結果的值 (避開 Limit/Unit)
-                        # 倒著找，忽略空值
+                        # 備用：倒著找最後一個非空值 (避開單位和Limit)
                         for cell in reversed(row):
                             if cell:
                                 cell_s = str(cell).strip()
-                                # 簡單過濾：如果看起來像單位就不取
-                                if cell_s.lower() in ["mg/kg", "ppm", "%"]: continue
+                                if cell_s.lower() in ["mg/kg", "ppm", "%"]: continue # 跳過單位
                                 target_val_str = cell_s
                                 break
                     
-                    # 清洗數值
                     cleaned_val = clean_value(target_val_str)
                     
                     # C. 存入結果
                     if matched_key:
                         current_val = result.get(matched_key)
-                        # 優先權邏輯：數值 > N.D. > None
                         if get_value_priority(cleaned_val) > get_value_priority(current_val):
                             result[matched_key] = cleaned_val
                             
@@ -276,7 +258,6 @@ def parse_cti(pdf_obj, full_text, first_page_text):
     result = {k: None for k in TARGET_ITEMS if k not in ['FILENAME', 'DATE']}
     result['PFAS'] = ""
     
-    # 日期
     date_match = re.search(r"(?i)(?:Date|日期)\s*[:：]?\s*(\d{4}[-./年]\s?\d{1,2}[-./月]\s?\d{1,2}|\w{3}\.\s*\d{1,2},\s*\d{4})", first_page_text)
     result['DATE'] = clean_date_str(date_match.group(1)) if date_match else ""
 
@@ -313,7 +294,6 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                     for pat, key in UNIFIED_REGEX_MAP.items():
                         if re.search(pat, row_str):
                             if key == "PFOS" and re.search(r"(?i)(Total|PFOSF|Derivative|总和|衍生物)", row_str): continue
-                            
                             if val is not None:
                                 current_val = result.get(key)
                                 if current_val is None or current_val == "N.D.": result[key] = val
@@ -362,7 +342,7 @@ def parse_intertek(pdf_obj, full_text, first_page_text):
                 
                 res_idx = -1
                 if len(table) > 1:
-                    row1 = table[2]
+                    row1 = table
                     left_val = str(row1[mdl_idx-1]) if mdl_idx > 0 else ""
                     right_val = str(row1[mdl_idx+1]) if mdl_idx + 1 < len(row1) else ""
                     
@@ -411,37 +391,14 @@ def identify_vendor(first_page_text):
     if "sgs" in text: return "SGS"
     return "UNKNOWN"
 
-def aggregate_reports(valid_results):
-    if not valid_results: return pd.DataFrame()
-    final_row = {k: None for k in TARGET_ITEMS}
-    
-    # 根據 Pb 值找最佳數據 (假設有 Pb 的報告最完整)
-    # sorted_by_pb = sorted(valid_results, key=lambda x: get_value_priority(x.get('Pb')), reverse=True)
-    
-    # 合併邏輯：取優先權最高的數值
-    for key in TARGET_ITEMS:
-        best_val = None
-        for res in valid_results:
-            val = res.get(key)
-            if get_value_priority(val) > get_value_priority(best_val):
-                best_val = val
-        final_row[key] = best_val
-    
-    # 取第一份檔案的檔名與日期作為代表 (或者可以改為列表)
-    if valid_results:
-        final_row['FILENAME'] = valid_results.get('FILENAME', '')
-        final_row['DATE'] = valid_results.get('DATE', '')
-
-    return pd.DataFrame([final_row])
-
 def main():
-    st.set_page_config(page_title="化學報告自動彙整系統 v6.0 (Column-Aware)", layout="wide")
-    st.title("🧪 化學測試報告自動彙整系統 v6.0")
+    st.set_page_config(page_title="化學報告自動彙整系統 v6.1 (Fix)", layout="wide")
+    st.title("🧪 化學測試報告自動彙整系統 v6.1")
     
     st.markdown("""
-    **SGS 專屬修正 (欄位定位版)：**
-    此版本已針對 SGS 報告的「Limit / MDL」誤判問題進行修正。
-    它會自動尋找「Result / No.1 / 001」欄位，而非掃描整行文字。
+    **SGS 專屬修正 (欄位定位 + 錯誤修復)：**
+    - 已修復 'list object' 錯誤。
+    - 採用欄位定位法，正確抓取 SGS 報告右側結果，避免誤判 Limit/MDL。
     """)
 
     uploaded_files = st.file_uploader("請上傳 PDF 報告 (支援多檔)", type="pdf", accept_multiple_files=True)
@@ -463,9 +420,10 @@ def main():
                             bucket_error.append(file.name)
                             continue
                         
+                        # [重要修正] 這裡必須指定 pages 來讀取第一頁，不能直接讀 pages 清單
                         first_page_text = pdf.pages.extract_text()
                         if not first_page_text:
-                            bucket_error.append(f"{file.name} (無法讀取)")
+                            bucket_error.append(f"{file.name} (第一頁無法讀取)")
                             continue
                         
                         full_text = ""
@@ -500,7 +458,6 @@ def main():
             status_text.text("分析完成！")
 
             if valid_results:
-                # 這裡改為列出所有檔案的結果，而非合併成一行 (因為上傳多檔通常是為了看每一檔的結果)
                 df_final = pd.DataFrame(valid_results)
                 
                 # 欄位排序
