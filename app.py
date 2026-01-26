@@ -5,7 +5,6 @@ import re
 import io
 from dateutil import parser
 
-
 # ==========================================
 # 0. 強制清除快取 (避免舊資料干擾)
 # ==========================================
@@ -19,7 +18,6 @@ try:
 except:
     pass
 
-
 # ==========================================
 # 1. 全局配置與字典
 # ==========================================
@@ -29,7 +27,6 @@ TARGET_ITEMS = [
     "F", "Cl", "Br", "I",
     "PFOS", "PFAS", "DATE", "FILENAME"
 ]
-
 
 # --- SGS 專用字典 (優化版) ---
 SGS_OPTIMIZED_MAP = {
@@ -51,7 +48,6 @@ SGS_OPTIMIZED_MAP = {
     'PFAS': ['PFAS']
 }
 
-
 # --- CTI/Intertek 通用字典 (維持原樣) ---
 UNIFIED_REGEX_MAP = {
     r"(?i)\b(Lead|Pb|铅)\b": "Pb",
@@ -69,11 +65,9 @@ UNIFIED_REGEX_MAP = {
     r"(?i)(Perfluorooctane\s*sulfonic\s*acid\s*\(PFOS\)|PFOS.*(salts|及其盐)|全氟辛烷磺酸)": "PFOS"
 }
 
-
 # 加總項目 Regex
 PBB_SUBITEMS = r"(?i)(Monobromobiphenyl|Dibromobiphenyl|Tribromobiphenyl|Tetrabromobiphenyl|Pentabromobiphenyl|Hexabromobiphenyl|Heptabromobiphenyl|Octabromobiphenyl|Nonabromobiphenyl|Decabromobiphenyl|一溴联苯|二溴联苯|三溴联苯|四溴联苯|五溴联苯|六溴联苯|七溴联苯|八溴联苯|九溴联苯|十溴联苯)"
 PBDE_SUBITEMS = r"(?i)(Monobromodiphenyl ether|Dibromodiphenyl ether|Tribromodiphenyl ether|Tetrabromodiphenyl ether|Pentabromodiphenyl ether|Hexabromodiphenyl ether|Heptabromodiphenyl ether|Octabromodiphenyl ether|Nonabromodiphenyl ether|Decabromodiphenyl ether|一溴二苯醚|二溴二苯醚|三溴二苯醚|四溴二苯醚|五溴二苯醚|六溴二苯醚|七溴二苯醚|八溴二苯醚|九溴二苯醚|十溴二苯醚)"
-
 
 # 英文月份對照表
 MONTH_MAP = {
@@ -82,7 +76,6 @@ MONTH_MAP = {
     "JAN": "01", "FEB": "02", "MAR": "03", "APR": "04", "MAY": "05", "JUN": "06",
     "JUL": "07", "AUG": "08", "SEP": "09", "OCT": "10", "NOV": "11", "DEC": "12"
 }
-
 
 # ==========================================
 # 2. 工具函數
@@ -104,7 +97,6 @@ def clean_date_str(date_str):
     except:
         return "1900/01/01"
 
-
 def clean_value(val_str):
     if not val_str: return None
     val_str = str(val_str).strip()
@@ -113,14 +105,12 @@ def clean_value(val_str):
     if val_str.lower() in ["mdl", "limit", "unit", "result", "loq", "requirement"]:
         return None
 
-
     # 處理 N.D. / Negative
     if re.search(r"(?i)(N\.?D\.?|Not Detected|<|Negative)", val_str):
         return "N.D."
     
     if re.search(r"(?i)(Positive)", val_str):
         return "POSITIVE"
-
 
     # 提取數字
     nums = re.findall(r"\d+\.?\d*", val_str)
@@ -131,13 +121,11 @@ def clean_value(val_str):
             pass
     return None
 
-
 def get_value_priority(val):
     if isinstance(val, (int, float)): return (3, val)
     if val in ["NEGATIVE", "POSITIVE"]: return (2, 0)
     if val == "N.D.": return (1, 0)
     return (0, 0)
-
 
 # ==========================================
 # 3. SGS 解析模組 (v6.3 修正與定位版)
@@ -146,7 +134,6 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
     result = {k: None for k in SGS_OPTIMIZED_MAP.keys()}
     result['PFAS'] = ""
     result['DATE'] = ""
-
 
     # --- 1. 日期抓取 ---
     # 針對 SGS 格式優化: Date: Feb 27, 2025
@@ -166,7 +153,6 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
             elif match_num:
                 result['DATE'] = clean_date_str(match_num.group(1))
                 break
-
 
     # --- 2. 數據抓取 (欄位定位法) ---
     pbb_sum = 0; pbde_sum = 0; pbb_found = False; pbde_found = False
@@ -215,7 +201,6 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                     if re.search(r"(?i)(Perfluorooctanoic\s*Acid|全氟辛酸)", row_str) and "PFOA" not in SGS_OPTIMIZED_MAP: continue
                     if "PFAS" in row_str and not result['PFAS']: result['PFAS'] = "REPORT"
 
-
                     # A. 識別測項
                     matched_key = None
                     for key, keywords in SGS_OPTIMIZED_MAP.items():
@@ -230,7 +215,6 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                     
                     if not matched_key and not is_pbb and not is_pbde:
                         continue
-
 
                     # B. 抓取數值 (使用欄位索引)
                     target_val_str = ""
@@ -262,15 +246,12 @@ def parse_sgs(pdf_obj, full_text, first_page_text):
                         pbde_found = True
                         if isinstance(cleaned_val, (int, float)): pbde_sum += cleaned_val
 
-
     # 處理總和項
     if "PFAS" in first_page_text: result["PFAS"] = "REPORT"
     result["PBBs"] = pbb_sum if pbb_found and pbb_sum > 0 else "N.D."
     result["PBDEs"] = pbde_sum if pbde_found and pbde_sum > 0 else "N.D."
 
-
     return result
-
 
 # ==========================================
 # 4. CTI/Intertek 解析模組 (維持原樣)
@@ -282,9 +263,7 @@ def parse_cti(pdf_obj, full_text, first_page_text):
     date_match = re.search(r"(?i)(?:Date|日期)\s*[:：]?\s*(\d{4}[-./年]\s?\d{1,2}[-./月]\s?\d{1,2}|\w{3}\.\s*\d{1,2},\s*\d{4})", first_page_text)
     result['DATE'] = clean_date_str(date_match.group(1)) if date_match else ""
 
-
     pbb_sum = 0; pbde_sum = 0; pbb_found = False; pbde_found = False
-
 
     with pdfplumber.open(pdf_obj) as pdf:
         for page in pdf.pages:
@@ -305,7 +284,6 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                 
                 if res_idx == -1: continue
 
-
                 for row_idx, row in enumerate(table[1:]):
                     if len(row) <= res_idx: continue
                     row_str = " ".join([str(c) for c in row if c]).replace("\n", " ")
@@ -313,9 +291,7 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                     if re.search(r"(?i)(PFOA|Perfluorooctanoic\s*Acid|全氟辛酸)", row_str): continue
                     if "PFAS" in row_str and not result['PFAS']: result['PFAS'] = "REPORT"
 
-
                     val = clean_value(row[res_idx])
-
 
                     for pat, key in UNIFIED_REGEX_MAP.items():
                         if re.search(pat, row_str):
@@ -332,18 +308,15 @@ def parse_cti(pdf_obj, full_text, first_page_text):
                     if re.search(PBDE_SUBITEMS, row_str):
                         pbde_found = True; pbde_sum += val if isinstance(val, (int, float)) else 0
 
-
     if "PFAS" in first_page_text: result["PFAS"] = "REPORT"
     result["PBBs"] = pbb_sum if pbb_found and pbb_sum > 0 else "N.D."
     result["PBDEs"] = pbde_sum if pbde_found and pbde_sum > 0 else "N.D."
     return result
 
-
 def parse_intertek(pdf_obj, full_text, first_page_text):
     result = {k: None for k in TARGET_ITEMS if k not in ['FILENAME', 'DATE']}
     result['PFAS'] = ""
     result['DATE'] = ""
-
 
     lines = first_page_text.split('\n')
     date_pat = r"(?i)(?:Date|Issue Date|발행일자)\s*[:：]?\s*([A-Za-z]{3}\s+\d{1,2},?\s*\d{4}|\d{4}[.\s]+\d{1,2}[.\s]+\d{1,2})"
@@ -353,9 +326,7 @@ def parse_intertek(pdf_obj, full_text, first_page_text):
             result['DATE'] = clean_date_str(match.group(1))
             break
 
-
     pbb_sum = 0; pbde_sum = 0; pbb_found = False; pbde_found = False
-
 
     with pdfplumber.open(pdf_obj) as pdf:
         for page in pdf.pages:
@@ -382,19 +353,15 @@ def parse_intertek(pdf_obj, full_text, first_page_text):
                     elif mdl_idx + 1 < len(header) and re.search(r"(?i)(Result|결과)", str(header[mdl_idx+1])): res_idx = mdl_idx + 1
                     elif mdl_idx - 1 >= 0 and re.search(r"(?i)(Result|结果)", str(header[mdl_idx-1])): res_idx = mdl_idx - 1
 
-
                 if res_idx == -1: continue
-
 
                 for row in table[1:]:
                     if len(row) <= res_idx: continue
                     row_str = " ".join([str(c) for c in row if c]).replace("\n", " ")
                     val = clean_value(row[res_idx])
 
-
                     if re.search(r"(?i)(PFOA|Perfluorooctanoic\s*Acid|全氟辛酸)", row_str): continue
                     if "PFAS" in row_str and not result['PFAS']: result['PFAS'] = "REPORT"
-
 
                     for pat, key in UNIFIED_REGEX_MAP.items():
                         if re.search(pat, row_str):
@@ -411,12 +378,10 @@ def parse_intertek(pdf_obj, full_text, first_page_text):
                     if re.search(PBDE_SUBITEMS, row_str):
                         pbde_found = True; pbde_sum += val if isinstance(val, (int, float)) else 0
 
-
     if "PFAS" in first_page_text: result["PFAS"] = "REPORT"
     result["PBBs"] = pbb_sum if pbb_found and pbb_sum > 0 else "N.D."
     result["PBDEs"] = pbde_sum if pbde_found and pbde_sum > 0 else "N.D."
     return result
-
 
 # ==========================================
 # 5. 主程式
@@ -428,30 +393,27 @@ def identify_vendor(first_page_text):
     if "sgs" in text: return "SGS"
     return "UNKNOWN"
 
-
 def main():
-    st.set_page_config(page_title="化學報告自動彙整系統 v6.3 (Final Fix)", layout="wide")
-    st.title("🧪 化學測試報告自動彙整系統 v6.3")
-    
+    def main():
+    st.set_page_config(page_title="化學報告自動彙整系統 v6.4 (Fixed)", layout="wide")
+    st.title("🧪 化學測試報告自動彙整系統 v6.4")
+
     st.markdown("""
     **SGS 專屬修正說明 (欄位定位 + 錯誤修復)：**
-    1. **已修復 'list object' 錯誤：** 透過 `pdf.pages` 正確讀取第一頁，確保 SGS/CTI/Intertek 皆能執行。
+    1. **已修復 'list object' 錯誤：** 修正 `pdf.pages` 讀取第一頁的語法錯誤。
     2. **SGS 邏輯優化：** 採用欄位定位法 (Column-based extraction)，鎖定最右側結果欄位 (ND)，避免誤抓中間的 Limit (1000) 或 MDL (2)。
     """)
-
-
+    
     uploaded_files = st.file_uploader("請上傳 PDF 報告 (支援多檔)", type="pdf", accept_multiple_files=True)
-
 
     if uploaded_files:
         if st.button("開始分析"):
             valid_results = []
             bucket_unknown = []
             bucket_error = []
-            
+
             progress_bar = st.progress(0)
             status_text = st.empty()
-
 
             for i, file in enumerate(uploaded_files):
                 status_text.text(f"正在處理: {file.name}...")
@@ -461,22 +423,22 @@ def main():
                         if len(pdf.pages) == 0:
                             bucket_error.append(file.name)
                             continue
-                        
-                        # [重要修正] 這裡加上  指定讀取第一頁
-                        first_page_text = pdf.pages.extract_text()
-                        
+
+                        # [修正] 這裡加上 [0] 指定讀取第一頁
+                        first_page_text = pdf.pages[0].extract_text()
+
                         if not first_page_text:
                             bucket_error.append(f"{file.name} (第一頁無法讀取)")
                             continue
-                        
+
                         full_text = ""
                         for page in pdf.pages:
                             txt = page.extract_text()
                             if txt: full_text += txt + "\n"
-                        
+
                         vendor = identify_vendor(first_page_text)
                         data = None
-                        
+
                         if vendor == "SGS":
                             data = parse_sgs(file, full_text, first_page_text)
                         elif vendor == "CTI":
@@ -486,43 +448,39 @@ def main():
                         else:
                             bucket_unknown.append(file.name)
                             continue
-                        
+
                         if data:
                             data['FILENAME'] = file.name
                             valid_results.append(data)
                         else:
                             bucket_error.append(f"{file.name} (解析失敗)")
 
-
                 except Exception as e:
                     bucket_error.append(f"{file.name} (錯誤: {str(e)})")
-                
-                progress_bar.progress((i + 1) / len(uploaded_files))
 
+                progress_bar.progress((i + 1) / len(uploaded_files))
 
             status_text.text("分析完成！")
 
-
             if valid_results:
                 df_final = pd.DataFrame(valid_results)
-                
+
                 # 欄位排序
                 cols = ["FILENAME", "DATE"] + [c for c in TARGET_ITEMS if c not in ["FILENAME", "DATE"]]
-                df_final = df_final[cols]
+                # 確保欄位存在，避免 KeyError
+                available_cols = [c for c in cols if c in df_final.columns]
+                df_final = df_final[available_cols]
 
-
-                st.success(f"✅ 成功處理 {len(valid_results)} 份報告：")
+                st.success(f" ✅  成功處理 {len(valid_results)} 份報告：")
                 st.dataframe(df_final)
-
 
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     df_final.to_excel(writer, index=False, sheet_name='Summary')
                 output.seek(0)
 
-
                 st.download_button(
-                    label="📥 下載 Excel",
+                    label=" 📥  下載 Excel",
                     data=output,
                     file_name=f"Report_Summary_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -530,15 +488,14 @@ def main():
             else:
                 st.warning("未提取到有效數據。")
 
-
             if bucket_unknown or bucket_error:
                 st.divider()
-                st.subheader("⚠️ 異常報告")
+                st.subheader(" ⚠ ️ 異常報告")
                 if bucket_unknown:
                     for name in bucket_unknown: st.write(f"- 🧪 未識別廠商: {name}")
                 if bucket_error:
-                    for name in bucket_error: st.write(f"- 🔴 錯誤: {name}")
-
+                    for name in bucket_error: st.write(f"-  🔴  錯誤: {name}")
 
 if __name__ == "__main__":
     main()
+
