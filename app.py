@@ -11,12 +11,12 @@ SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "鉛", "Pb"],
     "Cd": ["Cadmium", "鎘", "Cd"],
     "Hg": ["Mercury", "汞", "Hg"],
-    "Cr6+": ["Hexavalent Chromium", "六價鉻", "Cr(VI)", "Chromium VI"],
+    "Cr6+": ["Hexavalent Chromium", "六價鉻", "Cr(VI)", "Chromium VI", "Hexavalent Chromium"],
     "DEHP": ["DEHP", "Di(2-ethylhexyl) phthalate", "Bis(2-ethylhexyl) phthalate"],
     "BBP": ["BBP", "Butyl benzyl phthalate"],
     "DBP": ["DBP", "Dibutyl phthalate"],
     "DIBP": ["DIBP", "Diisobutyl phthalate"],
-    "PFOS": ["Perfluorooctane sulfonates", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid", "全氟辛烷磺酸"],
+    "PFOS": ["Perfluorooctane sulfonates", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid", "全氟辛烷磺酸", "Perfluorooctane Sulfonamide"],
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
     "BR": ["Bromine", "溴"],
@@ -80,15 +80,13 @@ def find_report_start_page(pdf):
 
 def extract_dates_v58(text):
     """
-    v58.1: 萬能清洗 (含中文) + 強化版積分過濾
+    v58/v59: 萬能清洗 (含中文) + 強化版積分過濾
     """
     lines = text.split('\n')
     candidates = [] # (score, date_object)
     
     # 1. 權重設定
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期"]
-    
-    # 毒藥關鍵字 (扣分 - 包含中文常見干擾)
     poison_kw = [
         "approve", "approved", "approval", "approver", 
         "check", "checked", "review", "reviewed",      
@@ -105,19 +103,17 @@ def extract_dates_v58(text):
     for line in lines:
         line_lower = line.lower()
         
-        # --- A. 計算分數 ---
         score = 1
         if any(bad in line_lower for bad in poison_kw):
-            score = -100 # 毒藥
+            score = -100 
         elif any(good in line_lower for good in bonus_kw):
-            score = 100 # 黃金
+            score = 100 
 
-        # --- B. 暴力清洗 (包含中文 年/月/日) ---
+        # 清洗：移除標點與中文單位
         clean_line = line.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
         clean_line = clean_line.replace("年", " ").replace("月", " ").replace("日", " ")
         clean_line = " ".join(clean_line.split())
 
-        # --- C. 嘗試匹配 ---
         found_dt = None
         for pat in [pat_ymd, pat_dmy, pat_mdy]:
             matches = re.finditer(pat, clean_line, re.IGNORECASE)
@@ -144,7 +140,7 @@ def extract_dates_v58(text):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
-        if n in [1000.0, 100.0, 50.0]: return True
+        if n in [1000.0, 100.0, 50.0, 25.0, 10.0, 5.0, 2.0]: return True
         return False
     except: return False
 
@@ -157,13 +153,17 @@ def parse_value_priority(value_str):
     
     if not val: return (0, 0, "")
     val_lower = val.lower()
-    if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits"]: 
+    
+    # 排除常見雜訊
+    if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits", "n.a.", "/"]: 
         return (0, 0, "")
     if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
     
-    num_only_match = re.search(r"([\d\.]+)", val)
+    # 數值檢查
+    num_only_match = re.search(r"^([\d\.]+)$", val)
     if num_only_match:
         if is_suspicious_limit_value(num_only_match.group(1)): return (0, 0, "")
+
     if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower: return (1, 0, "N.D.")
     if "negative" in val_lower or "陰性" in val_lower: return (2, 0, "NEGATIVE")
     
@@ -203,7 +203,7 @@ def identify_columns_by_company(table, company):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
 
     is_msds_table = False
-    if any(k in full_header_text for k in MSDS_HEADER_KEYWORDS) and "result" not in full_header_text:
+    if any(k in full_header_text for k in MSDS_HEADER_KEYWORDS) and "result" not in full_header_text and "结果" not in full_header_text:
         is_msds_table = True
 
     for r_idx in range(max_scan_rows):
@@ -211,24 +211,28 @@ def identify_columns_by_company(table, company):
         for c_idx, cell in enumerate(row):
             txt = clean_text(cell).lower()
             if not txt: continue
-            if "test item" in txt or "tested item" in txt or "測試項目" in txt:
+            
+            # v59.0: 加入簡體中文支援
+            if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt:
                 if item_idx == -1: item_idx = c_idx
             if "mdl" in txt or "loq" in txt:
                 if mdl_idx == -1: mdl_idx = c_idx
             if "limit" in txt or "限值" in txt:
                 if limit_idx == -1: limit_idx = c_idx
+                
             is_bad_header = any(bad in txt for bad in MSDS_HEADER_KEYWORDS)
             if not is_bad_header:
                 if company == "SGS":
-                     if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt) or 
+                     # v59.0: 加入簡體中文 "结果"
+                     if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt) or 
                         re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
                         if "cas" not in txt and "method" not in txt and "limit" not in txt:
                             if result_idx == -1: result_idx = c_idx
                 else:
-                    if ("result" in txt or "結果" in txt or re.search(r"00[1-9]", txt)):
+                    if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
                         if result_idx == -1: result_idx = c_idx
     
-    # SGS 文字救援觸發條件
+    # SGS MDL 旁推測
     if result_idx == -1 and company == "SGS":
         if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
             result_idx = mdl_idx + 1
@@ -279,7 +283,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
             found_val = ""
             for part in reversed(parts):
                 p_lower = part.lower()
-                if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---", "unit", "mdl"]: continue
+                if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---"]: continue
                 if "nd" in p_lower:
                     found_val = "N.D."
                     break
@@ -317,15 +321,17 @@ def process_files(files):
             with pdfplumber.open(file) as pdf:
                 start_page_idx = find_report_start_page(pdf)
                 company = "OTHERS"
+                first_page_text = ""
+                full_text_content = ""
+                
                 if len(pdf.pages) > start_page_idx:
-                    first_relevant_page_text = pdf.pages[start_page_idx].extract_text() or ""
-                    company = identify_company(first_relevant_page_text)
-                    if check_pfas_in_summary(first_relevant_page_text):
+                    first_page_text = pdf.pages[start_page_idx].extract_text() or ""
+                    company = identify_company(first_page_text)
+                    if check_pfas_in_summary(first_page_text):
                         data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
 
-                # 1. 日期提取 (v58 萬能清洗+積分)
+                # 1. 日期提取
                 file_dates_candidates = []
-                full_text_content = "" 
                 for p_idx in range(start_page_idx, len(pdf.pages)):
                     page = pdf.pages[p_idx]
                     page_txt = page.extract_text() or ""
@@ -365,27 +371,27 @@ def process_files(files):
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
-                            # v58.1 重點優化：如果該行是群組標題 (PBB/PBDE) 且包含數值，也要抓取
-                            is_group_header_match = False
-                            for gk in GROUP_KEYWORDS:
-                                for kw in GROUP_KEYWORDS[gk]:
-                                    if kw.lower() in item_name.lower():
-                                        is_group_header_match = True
-                                        break
-                                if is_group_header_match: break
-                            
-                            # 救援策略：如果 result 是空的，或者是群組標題，嘗試掃描整行找數值
-                            if not result or is_group_header_match:
+                            # v59.0 智慧行掃描 (Smart Row Scan)
+                            # 如果 result 抓到了像是 MDL 的數字 (如 50)，或者根本沒抓到
+                            # 就嘗試在同一行其他位置找數據
+                            temp_priority = parse_value_priority(result)
+                            if temp_priority[0] == 0: # 判定無效 (可能是抓錯欄位抓到 50)
+                                found_better = False
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
                                     if not cell: continue
                                     if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
                                         result = cell
+                                        found_better = True
                                         break
+                                    # 找數字，但避開 1000, 50, 10 這種限值
                                     if re.search(r"^\d+(\.\d+)?", cell):
-                                        if "1000" in cell: continue 
+                                        if is_suspicious_limit_value(cell): continue 
                                         result = cell
+                                        found_better = True
                                         break
+                                if not found_better and result_idx == -1: # 如果還是沒找到且欄位未定
+                                    pass 
 
                             priority = parse_value_priority(result)
                             if priority[0] == 0: continue 
@@ -413,15 +419,36 @@ def process_files(files):
                                         file_group_data[group_key].append(priority)
                                         break
                 
-                # 3. 引擎 B: 文字模式 (SGS 救援)
+                # 3. 引擎 B: 文字模式 (v59.0 擴大救援)
                 missing_targets = []
                 pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
                 if not pb_data: missing_targets.append("Pb")
-                if not file_group_data["PBB"]: missing_targets.append("PBB")
-                if not file_group_data["PBDE"]: missing_targets.append("PBDE")
                 
-                if company == "SGS" and missing_targets:
+                # v59.0: 檢查無鹵 (F/Cl/Br/I)
+                halogen_data = []
+                for h in ["F", "CL", "BR", "I"]:
+                    halogen_data.extend([d for d in data_pool[h] if d['filename'] == filename])
+                
+                # v59.0: 檢查 PFOS
+                pfos_data = [d for d in data_pool["PFOS"] if d['filename'] == filename]
+                
+                # 觸發條件：SGS 且 (Pb缺失 或 (有相關關鍵字但沒抓到數據))
+                trigger_rescue = False
+                if company == "SGS":
+                    if not pb_data: trigger_rescue = True
+                    # 如果內文有 Halogen 關鍵字但沒抓到數據 -> 觸發
+                    if ("halogen" in full_text_content.lower() or "卤素" in full_text_content) and not halogen_data:
+                        trigger_rescue = True
+                        missing_targets.extend(["F", "CL", "BR", "I"])
+                    # 如果內文有 PFOS 關鍵字但沒抓到數據 -> 觸發
+                    if "pfos" in full_text_content.lower() and not pfos_data:
+                        trigger_rescue = True
+                        missing_targets.append("PFOS")
+
+                if trigger_rescue:
                      parse_text_lines(full_text_content, data_pool, file_group_data, filename, company, targets=None)
+                     
+                     # 同步更新 Pb 追蹤
                      for d in data_pool["Pb"]:
                          if d['filename'] == filename:
                              p = d['priority']
@@ -433,14 +460,9 @@ def process_files(files):
                                  global_tracker["Pb"]["max_value"] = p[1]
                                  global_tracker["Pb"]["filename"] = filename
 
-            # 4. 結算 (三層過濾網的核心 - 自動結算)
+            # 4. 結算
             for group_key, values in file_group_data.items():
                 if values:
-                    # 這裡會自動選出該群組中「最優先」的數值
-                    # 如果有標題行的 ND，它會被加進來
-                    # 如果有 Sum 行的 ND，它也會被加進來
-                    # 如果只有細項的 ND，它們也會被加進來
-                    # 最後 sorted 取第一個，就能達成「有總和抓總和，沒總和看細項」的效果
                     best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
                     data_pool[group_key].append({"priority": best_in_file, "filename": filename})
 
@@ -448,7 +470,7 @@ def process_files(files):
             st.warning(f"檔案 {filename} 解析異常: {e}")
         progress_bar.progress((i + 1) / len(files))
 
-    # 5. 聚合輸出
+    # 5. 聚合
     final_row = {}
     for key in OUTPUT_COLUMNS:
         if key in ["日期", "檔案名稱"]: continue
@@ -474,9 +496,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v58.1", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v58.1 智能三層過濾版)")
-st.info("💡 v58.1：新增 PBDE/PBB「標題行即時掃描」與「自動細項補位」功能，解決無總和欄位的特殊報告問題，並保留所有舊版優點。")
+st.set_page_config(page_title="SGS 報告聚合工具 v59.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v59.0 簡中/救援強化版)")
+st.info("💡 v59.0：新增簡體中文支援，並強化文字救援觸發機制 (Halogen/PFOS)，解決表格欄位誤判問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -497,7 +519,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v58.1.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v59.0.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")
