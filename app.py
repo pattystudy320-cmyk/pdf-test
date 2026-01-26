@@ -436,7 +436,7 @@ def main():
                             continue
                         
                         # [重要修正] 這裡加上  指定讀取第一頁
-                        first_page_text = pdf.pages.extract_text()
+                        first_page_text = pdf.pages[0].extract_text()
                         
                         if not first_page_text:
                             bucket_error.append(f"{file.name} (第一頁無法讀取)")
@@ -509,3 +509,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
