@@ -80,12 +80,11 @@ def find_report_start_page(pdf):
 
 def extract_dates_v58(text):
     """
-    v58/v59/v60: 萬能清洗 (含中文) + 強化版積分過濾
+    v60.2: 萬能清洗 (含中文) + 積分過濾
     """
     lines = text.split('\n')
     candidates = [] # (score, date_object)
     
-    # 1. 權重設定
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期"]
     poison_kw = [
         "approve", "approved", "approval", "approver", 
@@ -95,21 +94,18 @@ def extract_dates_v58(text):
         "承認", "核准", "檢驗", "收件", "接收", "有效", "expiry", "valid", "期間", "周期", "時間"
     ]
 
-    # 2. 萬能正則
     pat_ymd = r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(0?[1-9]|[12][0-9]|3[01])"
     pat_dmy = r"(0?[1-9]|[12][0-9]|3[01])\s+([a-zA-Z]{3,})\s+(20\d{2})"
     pat_mdy = r"([a-zA-Z]{3,})\s+(0?[1-9]|[12][0-9]|3[01])\s+(20\d{2})"
 
     for line in lines:
         line_lower = line.lower()
-        
         score = 1
         if any(bad in line_lower for bad in poison_kw):
             score = -100 
         elif any(good in line_lower for good in bonus_kw):
             score = 100 
 
-        # 清洗：移除標點與中文單位
         clean_line = line.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
         clean_line = clean_line.replace("年", " ").replace("月", " ").replace("日", " ")
         clean_line = " ".join(clean_line.split())
@@ -154,12 +150,10 @@ def parse_value_priority(value_str):
     if not val: return (0, 0, "")
     val_lower = val.lower()
     
-    # 排除常見雜訊
     if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits", "n.a.", "/"]: 
         return (0, 0, "")
     if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
     
-    # 數值檢查
     num_only_match = re.search(r"^([\d\.]+)$", val)
     if num_only_match:
         if is_suspicious_limit_value(num_only_match.group(1)): return (0, 0, "")
@@ -212,7 +206,7 @@ def identify_columns_by_company(table, company):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            # v59.0: 加入簡體中文支援
+            # v60.2: 簡中標題支援
             if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt:
                 if item_idx == -1: item_idx = c_idx
             if "mdl" in txt or "loq" in txt:
@@ -261,10 +255,21 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # v60.1: 毒藥排除 (文字模式)
-            if key == "Cd" and ("hbcdd" in line_lower or "cyclododecane" in line_lower): continue
-            if key == "F" and any(bad in line_lower for bad in ["perfluoro", "pfos", "pfoa", "全氟"]): continue
-            if key == "BR" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
+            # --- v60.2: 嚴格毒藥防禦 (Guard Logic) ---
+            # 只有當該特定 key 遇到它的毒藥時，才跳過該 key 的匹配
+            # 絕對不能使用 continue 跳過整個迴圈，否則會害死其他 key (如 PBB)
+            
+            # 1. Cd 防禦 (針對 HBCDD)
+            if key == "Cd" and ("hbcdd" in line_lower or "cyclododecane" in line_lower): 
+                continue 
+            
+            # 2. F 防禦 (針對 全氟化合物)
+            if key == "F" and any(bad in line_lower for bad in ["perfluoro", "pfos", "pfoa", "全氟", "polyfluoro"]): 
+                continue
+            
+            # 3. Br 防禦 (針對 PBB/PBDE/HBCDD)
+            if key == "BR" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "multibrominated", "多溴", "六溴", "二苯醚", "hbcdd", "hexabromo"]): 
+                continue
 
             for kw in keywords:
                 if kw.lower() in line_lower and "test item" not in line_lower:
@@ -401,10 +406,16 @@ def process_files(files):
 
                             # 匹配邏輯
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
-                                # v60.1: 毒藥排除 (表格模式)
-                                if target_key == "Cd" and ("hbcdd" in item_name_lower or "cyclododecane" in item_name_lower): continue
-                                if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "pfos", "pfoa", "全氟"]): continue
-                                if target_key == "BR" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
+                                # --- v60.2: 表格模式毒藥防禦 ---
+                                # 1. Cd 防禦
+                                if target_key == "Cd" and ("hbcdd" in item_name_lower or "cyclododecane" in item_name_lower): 
+                                    continue
+                                # 2. F 防禦
+                                if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "pfos", "pfoa", "全氟", "polyfluoro"]): 
+                                    continue
+                                # 3. Br 防禦
+                                if target_key == "BR" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "multibrominated", "多溴", "六溴", "二苯醚", "hbcdd", "hexabromo"]): 
+                                    continue
 
                                 for kw in keywords:
                                     if kw.lower() in item_name_lower:
@@ -498,9 +509,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v60.1", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v60.1 誤抓防禦/漏抓修復版)")
-st.info("💡 v60.1：修正 Cd/F/Br 誤抓問題 (HBCDD/PFOS/PBB)，並新增 PBB/PBDE 「之和」支援，解決 SGS 中文報告漏抓。")
+st.set_page_config(page_title="SGS 報告聚合工具 v60.2", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v60.2 精準防禦版)")
+st.info("💡 v60.2：修復 PBB 誤殺問題，並完美防禦 F/Br/Cd 在 HBCDD/PFOS 報告中的誤抓。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -521,7 +532,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.1.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.2.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")
