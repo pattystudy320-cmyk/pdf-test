@@ -78,9 +78,9 @@ def find_report_start_page(pdf):
             return i
     return 0
 
-def extract_dates_v58(text):
+def extract_dates_v60_3(text):
     """
-    v60.2: 萬能清洗 (含中文) + 積分過濾
+    v60.3: 萬能清洗 (含中文) + 積分過濾
     """
     lines = text.split('\n')
     candidates = [] # (score, date_object)
@@ -206,7 +206,7 @@ def identify_columns_by_company(table, company):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            # v60.2: 簡中標題支援
+            # v60.3: 簡中標題支援
             if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt:
                 if item_idx == -1: item_idx = c_idx
             if "mdl" in txt or "loq" in txt:
@@ -255,20 +255,18 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # --- v60.2: 嚴格毒藥防禦 (Guard Logic) ---
-            # 只有當該特定 key 遇到它的毒藥時，才跳過該 key 的匹配
-            # 絕對不能使用 continue 跳過整個迴圈，否則會害死其他 key (如 PBB)
-            
+            # --- v60.3: 事前掃毒 (Pre-scan Block) ---
             # 1. Cd 防禦 (針對 HBCDD)
-            if key == "Cd" and ("hbcdd" in line_lower or "cyclododecane" in line_lower): 
+            if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane"]): 
                 continue 
             
             # 2. F 防禦 (針對 全氟化合物)
-            if key == "F" and any(bad in line_lower for bad in ["perfluoro", "pfos", "pfoa", "全氟", "polyfluoro"]): 
+            if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): 
                 continue
             
             # 3. Br 防禦 (針對 PBB/PBDE/HBCDD)
-            if key == "BR" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "multibrominated", "多溴", "六溴", "二苯醚", "hbcdd", "hexabromo"]): 
+            # 嚴格封鎖所有可能被誤判為鹵素溴的有機溴字根
+            if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): 
                 continue
 
             for kw in keywords:
@@ -347,7 +345,7 @@ def process_files(files):
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
                     if p_idx < start_page_idx + 5:
-                        dates = extract_dates_v58(page_txt)
+                        dates = extract_dates_v60_3(page_txt)
                         file_dates_candidates.extend(dates)
                 
                 if file_dates_candidates:
@@ -406,15 +404,15 @@ def process_files(files):
 
                             # 匹配邏輯
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
-                                # --- v60.2: 表格模式毒藥防禦 ---
+                                # --- v60.3: 表格模式毒藥防禦 (Pre-scan Block) ---
                                 # 1. Cd 防禦
-                                if target_key == "Cd" and ("hbcdd" in item_name_lower or "cyclododecane" in item_name_lower): 
+                                if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane"]): 
                                     continue
                                 # 2. F 防禦
-                                if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "pfos", "pfoa", "全氟", "polyfluoro"]): 
+                                if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): 
                                     continue
                                 # 3. Br 防禦
-                                if target_key == "BR" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "multibrominated", "多溴", "六溴", "二苯醚", "hbcdd", "hexabromo"]): 
+                                if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): 
                                     continue
 
                                 for kw in keywords:
@@ -509,9 +507,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v60.2", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v60.2 精準防禦版)")
-st.info("💡 v60.2：修復 PBB 誤殺問題，並完美防禦 F/Br/Cd 在 HBCDD/PFOS 報告中的誤抓。")
+st.set_page_config(page_title="SGS 報告聚合工具 v60.3", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v60.3 中英雙殺防禦版)")
+st.info("💡 v60.3：全方位封鎖 F/Br/Cd 誤抓漏洞 (針對 HBCDD/PFOS/PBB)，不論中英文皆可精準排除。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -532,7 +530,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.2.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.3.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")
