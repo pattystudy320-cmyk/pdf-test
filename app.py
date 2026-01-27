@@ -78,9 +78,9 @@ def find_report_start_page(pdf):
             return i
     return 0
 
-def extract_dates_v60(text):
+def extract_dates_v60_5(text):
     """
-    v60: 萬能清洗 (含中文) + 積分過濾
+    v60.5: 萬能清洗 (含中文) + 積分過濾
     """
     lines = text.split('\n')
     candidates = [] # (score, date_object)
@@ -254,9 +254,10 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # --- v60.4: 事前掃毒 (Pre-scan Block) ---
-            # 1. Cd 防禦 (針對 HBCDD 與 ECD)
-            if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): 
+            # --- v60.5: 事前掃毒 (Pre-scan Block) ---
+            # 1. Cd 防禦 (針對 HBCDD / ECD / PAHs)
+            # v60.5 新增: "indeno", "pyrene" (防 PAHs)
+            if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno", "pyrene"]): 
                 continue 
             
             # 2. F 防禦 (針對 全氟化合物)
@@ -267,7 +268,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): 
                 continue
             
-            # 4. Pb 防禦 (v60.4 新增：防止 PBB 被誤判為 Pb)
+            # 4. Pb 防禦 (防止吃掉 PBB)
             if key == "Pb" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]):
                 continue
 
@@ -348,7 +349,7 @@ def process_files(files):
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
                     if p_idx < start_page_idx + 5:
-                        dates = extract_dates_v60(page_txt)
+                        dates = extract_dates_v60_5(page_txt)
                         file_dates_candidates.extend(dates)
                 
                 if file_dates_candidates:
@@ -407,9 +408,9 @@ def process_files(files):
 
                             # 匹配邏輯
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
-                                # --- v60.4: 表格模式毒藥防禦 ---
-                                # 1. Cd 防禦
-                                if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): 
+                                # --- v60.5: 表格模式毒藥防禦 ---
+                                # 1. Cd 防禦 (新增 PAHs 防禦)
+                                if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno", "pyrene"]): 
                                     continue
                                 # 2. F 防禦
                                 if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): 
@@ -513,9 +514,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v60.4", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v60.4 最終完美修正版)")
-st.info("💡 v60.4：解決 Pb 誤判吃掉 PBB 問題，並徹底清除 ECD/HBCDD 導致的幽靈 Cd。")
+st.set_page_config(page_title="SGS 報告聚合工具 v60.5", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v60.5 PAHs/PBB 修復版)")
+st.info("💡 v60.5：解決 PAHs 導致的 Cd 誤判，並修復 Pb 關鍵字吃掉 PBB 的問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -536,7 +537,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.4.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.5.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")
