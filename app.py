@@ -25,7 +25,7 @@ SIMPLE_KEYWORDS = {
 
 GROUP_KEYWORDS = {
     "PBB": [
-        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和",
+        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和", "多溴聯苯之和", "多溴联苯之和",
         "Polybromobiphenyl", "Polybromobiphenyls",
         "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
         "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
@@ -37,7 +37,7 @@ GROUP_KEYWORDS = {
         "Decabrominated", "bromobiphenyl"
     ],
     "PBDE": [
-        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和",
+        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和", "多溴二苯醚之和", "多溴二苯醚之和",
         "Polybromodiphenyl ether", "Polybromodiphenyl ethers",
         "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
@@ -80,7 +80,7 @@ def find_report_start_page(pdf):
 
 def extract_dates_v58(text):
     """
-    v58/v59: 萬能清洗 (含中文) + 強化版積分過濾
+    v58/v59/v60: 萬能清洗 (含中文) + 強化版積分過濾
     """
     lines = text.split('\n')
     candidates = [] # (score, date_object)
@@ -223,7 +223,6 @@ def identify_columns_by_company(table, company):
             is_bad_header = any(bad in txt for bad in MSDS_HEADER_KEYWORDS)
             if not is_bad_header:
                 if company == "SGS":
-                     # v59.0: 加入簡體中文 "结果"
                      if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt) or 
                         re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
                         if "cas" not in txt and "method" not in txt and "limit" not in txt:
@@ -232,7 +231,6 @@ def identify_columns_by_company(table, company):
                     if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
                         if result_idx == -1: result_idx = c_idx
     
-    # SGS MDL 旁推測
     if result_idx == -1 and company == "SGS":
         if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
             result_idx = mdl_idx + 1
@@ -255,14 +253,21 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
     lines = text.split('\n')
     for line in lines:
         line_clean = clean_text(line)
+        line_lower = line_clean.lower()
         if not line_clean: continue
-        if any(bad in line_clean.lower() for bad in MSDS_HEADER_KEYWORDS): continue
+        if any(bad in line_lower for bad in MSDS_HEADER_KEYWORDS): continue
 
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
+            
+            # v60.1: 毒藥排除 (文字模式)
+            if key == "Cd" and ("hbcdd" in line_lower or "cyclododecane" in line_lower): continue
+            if key == "F" and any(bad in line_lower for bad in ["perfluoro", "pfos", "pfoa", "全氟"]): continue
+            if key == "BR" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
+
             for kw in keywords:
-                if kw.lower() in line_clean.lower() and "test item" not in line_clean.lower():
+                if kw.lower() in line_lower and "test item" not in line_lower:
                     matched_simple = key
                     break
             if matched_simple: break
@@ -272,7 +277,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
             for group_key, keywords in GROUP_KEYWORDS.items():
                 if targets and group_key not in targets: continue
                 for kw in keywords:
-                    if kw.lower() in line_clean.lower():
+                    if kw.lower() in line_lower:
                         matched_group = group_key
                         break
                 if matched_group: break
@@ -283,7 +288,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
             found_val = ""
             for part in reversed(parts):
                 p_lower = part.lower()
-                if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---"]: continue
+                if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---", "unit", "mdl"]: continue
                 if "nd" in p_lower:
                     found_val = "N.D."
                     break
@@ -364,18 +369,17 @@ def process_files(files):
                             target_item_col = item_idx if item_idx != -1 else 0
                             if target_item_col >= len(clean_row): continue
                             item_name = clean_row[target_item_col]
+                            item_name_lower = item_name.lower()
                             
-                            if "pvc" in item_name.lower() or "polyvinyl" in item_name.lower(): continue
+                            if "pvc" in item_name_lower or "polyvinyl" in item_name_lower: continue
 
                             result = ""
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
-                            # v59.0 智慧行掃描 (Smart Row Scan)
-                            # 如果 result 抓到了像是 MDL 的數字 (如 50)，或者根本沒抓到
-                            # 就嘗試在同一行其他位置找數據
+                            # v59.0 智慧行掃描
                             temp_priority = parse_value_priority(result)
-                            if temp_priority[0] == 0: # 判定無效 (可能是抓錯欄位抓到 50)
+                            if temp_priority[0] == 0: 
                                 found_better = False
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
@@ -384,13 +388,12 @@ def process_files(files):
                                         result = cell
                                         found_better = True
                                         break
-                                    # 找數字，但避開 1000, 50, 10 這種限值
                                     if re.search(r"^\d+(\.\d+)?", cell):
                                         if is_suspicious_limit_value(cell): continue 
                                         result = cell
                                         found_better = True
                                         break
-                                if not found_better and result_idx == -1: # 如果還是沒找到且欄位未定
+                                if not found_better and result_idx == -1: 
                                     pass 
 
                             priority = parse_value_priority(result)
@@ -398,9 +401,14 @@ def process_files(files):
 
                             # 匹配邏輯
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
+                                # v60.1: 毒藥排除 (表格模式)
+                                if target_key == "Cd" and ("hbcdd" in item_name_lower or "cyclododecane" in item_name_lower): continue
+                                if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "pfos", "pfoa", "全氟"]): continue
+                                if target_key == "BR" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
+
                                 for kw in keywords:
-                                    if kw.lower() in item_name.lower():
-                                        if target_key == "PFOS" and "related" in item_name.lower(): continue 
+                                    if kw.lower() in item_name_lower:
+                                        if target_key == "PFOS" and "related" in item_name_lower: continue 
                                         data_pool[target_key].append({"priority": priority, "filename": filename})
                                         if target_key == "Pb":
                                             score, val = priority[0], priority[1]
@@ -415,7 +423,7 @@ def process_files(files):
 
                             for group_key, keywords in GROUP_KEYWORDS.items():
                                 for kw in keywords:
-                                    if kw.lower() in item_name.lower():
+                                    if kw.lower() in item_name_lower:
                                         file_group_data[group_key].append(priority)
                                         break
                 
@@ -424,23 +432,18 @@ def process_files(files):
                 pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
                 if not pb_data: missing_targets.append("Pb")
                 
-                # v59.0: 檢查無鹵 (F/Cl/Br/I)
                 halogen_data = []
                 for h in ["F", "CL", "BR", "I"]:
                     halogen_data.extend([d for d in data_pool[h] if d['filename'] == filename])
                 
-                # v59.0: 檢查 PFOS
                 pfos_data = [d for d in data_pool["PFOS"] if d['filename'] == filename]
                 
-                # 觸發條件：SGS 且 (Pb缺失 或 (有相關關鍵字但沒抓到數據))
                 trigger_rescue = False
                 if company == "SGS":
                     if not pb_data: trigger_rescue = True
-                    # 如果內文有 Halogen 關鍵字但沒抓到數據 -> 觸發
                     if ("halogen" in full_text_content.lower() or "卤素" in full_text_content) and not halogen_data:
                         trigger_rescue = True
                         missing_targets.extend(["F", "CL", "BR", "I"])
-                    # 如果內文有 PFOS 關鍵字但沒抓到數據 -> 觸發
                     if "pfos" in full_text_content.lower() and not pfos_data:
                         trigger_rescue = True
                         missing_targets.append("PFOS")
@@ -448,7 +451,6 @@ def process_files(files):
                 if trigger_rescue:
                      parse_text_lines(full_text_content, data_pool, file_group_data, filename, company, targets=None)
                      
-                     # 同步更新 Pb 追蹤
                      for d in data_pool["Pb"]:
                          if d['filename'] == filename:
                              p = d['priority']
@@ -496,9 +498,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v59.0", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v59.0 簡中/救援強化版)")
-st.info("💡 v59.0：新增簡體中文支援，並強化文字救援觸發機制 (Halogen/PFOS)，解決表格欄位誤判問題。")
+st.set_page_config(page_title="SGS 報告聚合工具 v60.1", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v60.1 誤抓防禦/漏抓修復版)")
+st.info("💡 v60.1：修正 Cd/F/Br 誤抓問題 (HBCDD/PFOS/PBB)，並新增 PBB/PBDE 「之和」支援，解決 SGS 中文報告漏抓。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -519,7 +521,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v59.0.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.1.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")
