@@ -78,12 +78,12 @@ def find_report_start_page(pdf):
             return i
     return 0
 
-def extract_dates_v60_8(text):
+def extract_dates_v60_9(text):
     """
-    v60.8: 支援 Reported Date, 排除 Job Ref/Ref No/Date of expiry
+    v60.9: 支援 Reported Date, 排除 Job Ref
     """
     lines = text.split('\n')
-    candidates = [] # (score, date_object)
+    candidates = [] 
     
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期", "reported date"]
     poison_kw = [
@@ -137,35 +137,62 @@ def extract_dates_v60_8(text):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
-        # v60.8: 保留常見 MDL/Limit 數字
         if n in [1000.0, 100.0, 50.0, 25.0, 10.0, 8.0, 5.0, 2.0]: return True
         return False
     except: return False
 
-def is_unit_or_method(val):
+def extract_dirty_value(val):
+    """
+    v60.9: 從髒數據中提取 N.D. 或數值
+    例如: "With reference to IEC... N.D." -> "N.D."
+    """
     val_lower = val.lower()
-    if any(u in val_lower for u in ["mg/kg", "ppm", "%", "unit"]): return True
-    if any(m in val_lower for m in ["iec", "iso", "epa", "reference", "with", "analysis", "performed", "method"]): return True
-    return False
+    # 優先提取 N.D.
+    if "n.d." in val_lower or "not detected" in val_lower or "<" in val_lower:
+        return "N.D."
+    if "negative" in val_lower:
+        return "NEGATIVE"
+    
+    # 嘗試提取純數字 (避開年份如 2017)
+    # 這裡簡單處理: 如果包含數字且不包含 method 關鍵字太多的話... 
+    # 但如果是沾黏欄位，通常 method 關鍵字會很多。
+    # 策略: 如果沒找到 ND，但字串很長且包含 method 關鍵字，就放棄 (避免誤判 MDL)
+    if any(m in val_lower for m in ["iec", "iso", "reference", "method", "analysis"]):
+        # 這裡很危險，如果黏在一起的是 "Method... 123"，很難分。
+        # 暫時只救 N.D.，數值型沾黏比較少見且風險高
+        return ""
+        
+    return val
 
 def parse_value_priority(value_str):
     if not value_str: return (0, 0, "")
-    # v60.8: 內容清洗，只取第一行 (針對 N.D.\n(Not Detected))
-    raw_val = str(value_str).split('\n')[0].strip()
     
-    if "(" in raw_val and ")" in raw_val:
-        if re.search(r"\(\d+\)", raw_val):
-            raw_val = raw_val.split("(")[0].strip()
-    val = raw_val.replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
+    # v60.9: 先嘗試清洗髒數據
+    clean_val = extract_dirty_value(str(value_str).split('\n')[0].strip())
+    if not clean_val:
+        # 如果清洗後為空 (代表可能是純 Method 文字)，就回傳無效
+        # 但要注意，如果原本就是 "123"，extract_dirty_value 可能會回傳 "123" (如果沒觸發 method 關鍵字)
+        clean_val = str(value_str).split('\n')[0].strip()
+
+    # 再次檢查是否為純 Method/Unit (雙重過濾)
+    val_lower = clean_val.lower()
+    if any(u in val_lower for u in ["mg/kg", "ppm", "%", "unit"]): return (0, 0, "")
+    if any(m in val_lower for m in ["iec", "iso", "epa", "reference", "with", "analysis", "performed", "method"]): 
+        # 如果還有 method 關鍵字 (且沒被 extract_dirty_value 救成 ND)，則視為無效
+        return (0, 0, "")
+
+    if "(" in clean_val and ")" in clean_val:
+        if re.search(r"\(\d+\)", clean_val):
+            clean_val = clean_val.split("(")[0].strip()
+    
+    val = clean_val.replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
     
     if not val: return (0, 0, "")
     val_lower = val.lower()
     
-    if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "method", "004", "001", "no.1", "---", "-", "limits", "n.a.", "/"]: 
+    if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "004", "001", "no.1", "---", "-", "limits", "n.a.", "/"]: 
         return (0, 0, "")
     if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
-    
-    if is_unit_or_method(val): return (0, 0, "")
 
     num_only_match = re.search(r"^([\d\.]+)$", val)
     if num_only_match:
@@ -198,7 +225,48 @@ def identify_company(text):
 
 # --- 3. 核心：表格識別 ---
 
+def identify_columns_smart(table):
+    """
+    v60.9: 智能內容定位 (Content-Based)
+    不依賴標題，直接掃描前幾行數據特徵
+    """
+    item_idx = -1
+    result_idx = -1
+    
+    max_scan_rows = min(5, len(table))
+    
+    # 掃描每一欄
+    for c_idx in range(len(table[0])):
+        item_score = 0
+        result_score = 0
+        
+        for r_idx in range(max_scan_rows):
+            cell_val = clean_text(table[r_idx][c_idx])
+            if not cell_val: continue
+            cell_lower = cell_val.lower()
+            
+            # 檢查是否像 Item
+            for klist in SIMPLE_KEYWORDS.values():
+                if any(k.lower() in cell_lower for k in klist):
+                    item_score += 1
+                    break
+            
+            # 檢查是否像 Result
+            p = parse_value_priority(cell_val)
+            if p[0] > 0: # 是有效數值或 ND
+                result_score += 1
+        
+        # 簡單判定：如果某一欄 Item 特徵明顯，設為 item_idx
+        if item_score >= 1 and item_idx == -1:
+            item_idx = c_idx
+        # 如果某一欄 Result 特徵明顯，設為 result_idx
+        if result_score >= 1 and result_idx == -1:
+            result_idx = c_idx
+            
+    return item_idx, result_idx
+
 def identify_columns_by_company(table, company):
+    # 1. 嘗試標題定位 (Header-Based)
     item_idx = -1
     result_idx = -1
     mdl_idx = -1
@@ -219,10 +287,10 @@ def identify_columns_by_company(table, company):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            # v60.8: 模糊匹配 Test Parameter，只要同時有 test 和 parameter 就算
-            if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt:
+            if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt or "test parameter" in txt:
                 if item_idx == -1: item_idx = c_idx
-            elif "test" in txt and "parameter" in txt: # v60.8: 針對馬來西亞版
+            # v60.9: 模糊匹配 Test Parameter
+            elif "test" in txt and "parameter" in txt:
                 if item_idx == -1: item_idx = c_idx
                 
             if "mdl" in txt or "loq" in txt:
@@ -235,13 +303,18 @@ def identify_columns_by_company(table, company):
                 if company == "SGS":
                      if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt) or 
                         re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
-                        # v60.8: 更嚴格的 result 判定，防止 method 被誤判
                         if "cas" not in txt and "method" not in txt and "limit" not in txt:
                             if result_idx == -1: result_idx = c_idx
                 else:
                     if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
                         if result_idx == -1: result_idx = c_idx
     
+    # 2. v60.9: 如果標題定位失敗，啟動智能內容定位
+    if (item_idx == -1 or result_idx == -1) and not is_msds_table:
+        s_item, s_result = identify_columns_smart(table)
+        if item_idx == -1: item_idx = s_item
+        if result_idx == -1: result_idx = s_result
+
     is_reference_table = False
     if is_msds_table: is_reference_table = True
     elif result_idx == -1 and mdl_idx == -1:
@@ -268,7 +341,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # --- v60.8: 事前掃毒 ---
+            # --- v60.9: 事前掃毒 ---
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno", "pyrene"]): 
                 continue 
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): 
@@ -300,10 +373,12 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
             found_val = ""
             for part in reversed(parts):
                 p_lower = part.lower()
-                if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---", "unit", "mdl", "iec", "method"]: continue
+                # v60.9: 文字模式也要避開 Method 關鍵字, 但允許 ND
                 if "nd" in p_lower:
                     found_val = "N.D."
                     break
+                if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---", "unit", "mdl", "iec", "method"]: continue
+                
                 if re.match(r"^\d+.*$", part): 
                     val_check = part.replace("▲", "").replace("△", "")
                     try:
@@ -354,7 +429,7 @@ def process_files(files):
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
                     if p_idx < start_page_idx + 5:
-                        dates = extract_dates_v60_8(page_txt)
+                        dates = extract_dates_v60_9(page_txt)
                         file_dates_candidates.extend(dates)
                 
                 if file_dates_candidates:
@@ -386,44 +461,35 @@ def process_files(files):
                             if "pvc" in item_name_lower or "polyvinyl" in item_name_lower: continue
 
                             result = ""
-                            
-                            # v60.8: 優先使用標題座標鎖定 (最穩定)
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
-                            # v60.8: 智慧 MDL 左右偵測 (備案：當標題找不到時)
+                            # v60.9: 還是找不到？嘗試用 MDL 左右推算 (但這次會避開 Unit)
                             if (not result or parse_value_priority(result)[0] == 0) and mdl_idx != -1:
-                                # 往左找
                                 for step in [1, 2]:
                                     if mdl_idx - step >= 0:
                                         val = clean_row[mdl_idx - step]
-                                        if is_unit_or_method(val): continue
                                         if parse_value_priority(val)[0] > 0:
                                             result = val
                                             break
-                                # 往右找
                                 if not result or parse_value_priority(result)[0] == 0:
                                     for step in [1, 2]:
                                         if mdl_idx + step < len(clean_row):
                                             val = clean_row[mdl_idx + step]
-                                            if is_unit_or_method(val): continue
                                             if parse_value_priority(val)[0] > 0:
                                                 result = val
                                                 break
 
-                            # v60.8: 最後防線 - 智慧行掃描 (清洗內容後判定)
+                            # v60.9: 最後防線 - 智慧行掃描 (parse_value_priority 已內建髒數據清洗)
                             temp_priority = parse_value_priority(result)
                             if temp_priority[0] == 0: 
                                 found_better = False
                                 for cell in reversed(clean_row):
                                     c_lower = cell.lower()
                                     if not cell: continue
-                                    if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
-                                        result = cell
-                                        found_better = True
-                                        break
-                                    if re.search(r"^\d+(\.\d+)?", cell):
-                                        if is_suspicious_limit_value(cell): continue 
+                                    # v60.9: 即使黏在一起，parse_value_priority 也會嘗試救回 ND
+                                    p = parse_value_priority(cell)
+                                    if p[0] > 0:
                                         result = cell
                                         found_better = True
                                         break
@@ -465,7 +531,7 @@ def process_files(files):
                                         file_group_data[group_key].append(priority)
                                         break
                 
-                # 3. 引擎 B: 文字模式 (v60.8 擴大救援)
+                # 3. 引擎 B: 文字模式 (v60.9 擴大救援)
                 missing_targets = []
                 pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
                 if not pb_data: missing_targets.append("Pb")
@@ -477,11 +543,12 @@ def process_files(files):
                 pfos_data = [d for d in data_pool["PFOS"] if d['filename'] == filename]
                 
                 trigger_rescue = False
+                # v60.9: 只要是 SGS，且缺數據，就啟動
                 if company == "SGS":
                     if not pb_data: trigger_rescue = True
-                    # v60.8: Combustion + Chromatography 救援 (忽略 Ion)
+                    # v60.9: 無鹵救援條件放寬，只要 halogen 數據沒抓齊 (小於4個) 就觸發
                     ft_lower = full_text_content.lower()
-                    if ("halogen" in ft_lower or "卤素" in ft_lower or ("combustion" in ft_lower and "chromatography" in ft_lower)) and not halogen_data:
+                    if ("halogen" in ft_lower or "卤素" in ft_lower or ("combustion" in ft_lower and "chromatography" in ft_lower)) and len(halogen_data) < 4:
                         trigger_rescue = True
                         missing_targets.extend(["F", "CL", "BR", "I"])
                     if "pfos" in ft_lower and not pfos_data:
@@ -538,9 +605,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v60.8", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v60.8 座標鎖定/強效清洗版)")
-st.info("💡 v60.8：採用「標題座標鎖定」與「強制內容清洗」技術，徹底解決 SGS 馬來西亞版欄位偏移與 OCR 換行問題。")
+st.set_page_config(page_title="SGS 報告聚合工具 v60.9", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v60.9 內容為王版)")
+st.info("💡 v60.9：新增智能內容定位與髒數據清洗功能，無視欄位沾黏或標題錯誤，強力抓取 SGS 馬來西亞版數據。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -561,7 +628,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.8.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.9.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")
