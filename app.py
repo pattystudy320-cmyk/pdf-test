@@ -7,10 +7,10 @@ import io
 
 # 設定頁面資訊
 st.set_page_config(page_title="SGS Report Parser", layout="wide")
-st.title("📄 SGS Report 檢測結果彙總工具 (最終邏輯版)")
+st.title("📄 SGS Report 檢測結果彙總工具 (DEHP 修正版)")
 
 # =========================
-# 1. 欄位定義規則 (Regex)
+# 1. 欄位定義規則
 # =========================
 ITEM_RULES = {
     "Pb": r"Lead\s*\(Pb\)",
@@ -23,7 +23,7 @@ ITEM_RULES = {
     "BBP": r"BBP|Benzyl\s*butyl\s*phthalate",
     "DBP": r"DBP|Dibutyl\s*phthalate",
     "DIBP": r"DIBP|Diisobutyl\s*phthalate",
-    "F": r"\bFluorine\b",   # 加 \b 避免抓到部分單字
+    "F": r"\bFluorine\b",
     "CL": r"\bChlorine\b",
     "BR": r"\bBromine\b",
     "I": r"\bIodine\b",
@@ -54,45 +54,55 @@ def extract_text_and_pages(pdf_file):
 
 def extract_result(text, keyword, item_name):
     """
-    最終版邏輯 V5 (數字計數法):
-    1. 找到關鍵字所在行。
-    2. 強力清除雜訊 (Year, CAS, Limit)。
-    3. 優先檢查 N.D.。
-    4. 計算剩餘數字數量：
-       - PBBs/PBDEs: 剩下 1 個數字 -> 視為 Result (因 MDL 為 -)。
-       - 其他項目: 剩下 1 個數字 -> 視為 MDL -> 回傳 N.D.。
-                 剩下 2 個數字 -> 第一個為 Result。
+    V6 最終邏輯:
+    1. DEHP 特例: 擴大讀取 4 行，並刪除名字裡的 "2"。
+    2. 除噪: 刪除 Max, MDL, Year, CAS。
+    3. N.D. 優先: 只要有 N.D. 就回傳。
+    4. 數字計數: 
+       - PBBs/PBDEs: 1 個數字 -> Result
+       - 其他: 1 個數字 -> MDL (回傳 N.D.) / 2 個數字 -> 取第 1 個
     """
     lines = text.splitlines()
 
     for i, line in enumerate(lines):
         # 步驟 A: 鎖定關鍵字所在的行
         if re.search(keyword, line, re.IGNORECASE):
-            # 抓取上下文 (當行 + 下一行)，縮小範圍
-            context = " ".join(lines[i:i+2])
+            
+            # --- DEHP 特例設定 1: 擴大視野 ---
+            if item_name == "DEHP":
+                # DEHP 名字長且常換行，多讀幾行確保抓到 N.D.
+                context = " ".join(lines[i:i+4])
+            else:
+                # 一般項目讀 2 行就夠 (避免抓到別欄)
+                context = " ".join(lines[i:i+2])
 
             # ==========================================
             # 步驟 B: 手術室 - 強力切除雜訊
             # ==========================================
             
+            # --- DEHP 特例設定 2: 消滅內鬼 ---
+            if item_name == "DEHP":
+                # 刪除 "2-ethylhexyl" 和 "Di(2-"，避免抓到名字裡的 2
+                context = re.sub(r"2-ethylhexyl", " ", context, flags=re.IGNORECASE)
+                context = re.sub(r"Di\(2-", " ", context, flags=re.IGNORECASE)
+
             # 1. 切除單位
             context = re.sub(r"mg/kg|ppm|%|wt%", " ", context, flags=re.IGNORECASE)
 
             # 2. 切除 CAS No.
             context = re.sub(r"\(?CAS\s*No\.?[\s\d-]+\)?", " ", context, flags=re.IGNORECASE)
 
-            # 3. 切除 標準編號與年份 (IEC 62321...:2017)
+            # 3. 切除 標準編號與年份
             context = re.sub(r"IEC\s*62321[-\d:+A]*", " ", context, flags=re.IGNORECASE)
-            context = re.sub(r"\b(19|20)\d{2}\b", " ", context) # 移除 20xx 年份
+            context = re.sub(r"\b(19|20)\d{2}\b", " ", context) 
 
-            # 4. 切除 Limit / MDL 標籤與數值 (Max 1000, MDL 2)
+            # 4. 切除 Limit / MDL 標籤與數值
             context = re.sub(r"(Max|Limit|MDL|LOQ)\s*\d+(\.\d+)?", " ", context, flags=re.IGNORECASE)
 
             # ==========================================
             # 步驟 C: N.D. 判定 (最高優先級)
             # ==========================================
             
-            # 只要有 N 和 D，且非單字一部分 (例如 N.D., ND, N. D., Not Detected)
             nd_pattern = r"(\bN\s*\.?\s*D\s*\.?\b)|(Not\s*Detected)"
             if re.search(nd_pattern, context, re.IGNORECASE):
                 return "N.D."
@@ -104,40 +114,33 @@ def extract_result(text, keyword, item_name):
             # 步驟 D: 數字計數法 (核心邏輯)
             # ==========================================
             
-            # 抓出剩餘的所有數字 (支援整數與小數)
             nums = re.findall(r"\b\d+(?:\.\d+)?\b", context)
             
             if not nums:
-                # 沒數字也沒 N.D.，保守回傳 N.D.
                 return "N.D."
 
             # --- 依照 Item 決定策略 ---
             
-            # 特權項目: PBBs / PBDEs (MDL 可能是 Dash "-")
+            # 特權項目: PBBs / PBDEs (MDL 為 Dash "-")
             if item_name in ["PBBs", "PBDEs"]:
-                # 如果有數字，就直接抓第一個 (忽略只有一個數字只能是 MDL 的規則)
-                return nums[0]
+                return nums[0] # 直接回傳唯一的數字
             
-            # 一般項目: Pb, Cd, F, Cl 等 (MDL 必填)
+            # 一般項目: Pb, Cd, DEHP 等 (MDL 必填)
             else:
                 if len(nums) >= 2:
-                    # 剩下兩個以上數字：[結果] [MDL]
-                    # 第一個是結果
+                    # 剩下兩個以上數字：[結果] [MDL] -> 取第 1 個
                     found_val = nums[0]
-                    # 防呆：如果是年份殘渣 (1990-2030 整數)，跳過
+                    # 防呆：如果是年份殘渣
                     try:
                         f_val = float(found_val)
                         if 1990 <= f_val <= 2030 and f_val.is_integer():
-                            # 如果第一個像是年份，且還有第二個數字，那就取第二個
-                            return nums[1]
+                             return nums[1]
                     except:
                         pass
                     return found_val
                 
                 elif len(nums) == 1:
-                    # 只剩下一個數字！
-                    # 極大機率是 N.D. 沒抓到，剩下的這個是 MDL (如 2.0, 50.0)
-                    # 強制判定為 N.D.
+                    # 只剩下一個數字，極大機率是 MDL (如 2.0, 50.0) -> 強制判定為 N.D.
                     return "N.D."
 
     return ""
@@ -163,9 +166,6 @@ def normalize_date(date_text):
         return ""
 
 def merge_results(values):
-    """
-    彙總邏輯：取最大值，若有 N.D. 則優先級低於數值
-    """
     nums = []
     has_nd = False
     has_neg = False
@@ -209,11 +209,10 @@ if uploaded_files:
         full_text, pages_text = extract_text_and_pages(file)
         record = {}
 
-        # 抓取各項目，傳入 item key 以便區分特權邏輯
+        # 傳入 item name 以便啟用 DEHP 特例邏輯
         for item, keyword in ITEM_RULES.items():
             record[item] = extract_result(full_text, keyword, item)
 
-        # 特殊項目與日期
         record["PFAS"] = extract_pfas(full_text)
         raw_date = extract_date(pages_text[0]) if pages_text else ""
         record["DATE"] = normalize_date(raw_date)
@@ -240,7 +239,6 @@ if uploaded_files:
 
         df_final = pd.DataFrame([merged], columns=FINAL_COLUMNS)
 
-        # 顯示與下載
         st.subheader("📊 彙總結果（同批 SGS Report）")
         st.dataframe(df_final, use_container_width=True)
 
