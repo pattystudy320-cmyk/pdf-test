@@ -3,12 +3,13 @@ import pdfplumber
 import pandas as pd
 import re
 from dateutil import parser
+import io
 
 st.set_page_config(page_title="SGS Report Parser", layout="wide")
 st.title("📄 SGS Report 檢測結果彙總工具")
 
 # =========================
-# 欄位與關鍵字定義
+# 欄位定義（順序固定）
 # =========================
 ITEM_RULES = {
     "Pb": r"Lead\s*\(Pb\)",
@@ -29,7 +30,6 @@ ITEM_RULES = {
 }
 
 FINAL_COLUMNS = [
-    "PartNo",
     "Pb","Cd","Hg","CrVI","PBBs","PBDEs",
     "DEHP","BBP","DBP","DIBP",
     "F","CL","BR","I",
@@ -51,28 +51,27 @@ def extract_text_and_pages(pdf_file):
 
 
 def extract_result(text, keyword):
-    blocks = re.findall(
-        rf"{keyword}.*?(?:\n|$)",
-        text,
-        re.IGNORECASE | re.DOTALL
-    )
-    if not blocks:
-        return ""
+    lines = text.splitlines()
 
-    block_text = " ".join(blocks)
+    for i, line in enumerate(lines):
+        if re.search(keyword, line, re.IGNORECASE):
+            context = " ".join(lines[i:i+3])
 
-    # 1️⃣ 數值優先
-    num = re.search(r"(\d+(\.\d+)?)", block_text)
-    if num:
-        return num.group(1)
+            # 排除 IEC 62321 方法編號
+            context = re.sub(r"IEC\s*62321[-\d:]*", "", context, flags=re.IGNORECASE)
 
-    # 2️⃣ NEGATIVE
-    if re.search(r"NEGATIVE", block_text, re.IGNORECASE):
-        return "NEGATIVE"
+            # 1️⃣ 數值（只抓結果）
+            num = re.search(r"\b(\d+(\.\d+)?)\b", context)
+            if num:
+                return num.group(1)
 
-    # 3️⃣ N.D.
-    if re.search(r"N\.D\.", block_text, re.IGNORECASE):
-        return "N.D."
+            # 2️⃣ NEGATIVE
+            if re.search(r"NEGATIVE", context, re.IGNORECASE):
+                return "NEGATIVE"
+
+            # 3️⃣ N.D.
+            if re.search(r"N\.D\.", context, re.IGNORECASE):
+                return "N.D."
 
     return ""
 
@@ -119,36 +118,35 @@ def merge_results(values):
         return "N.D."
     return ""
 
+
 # =========================
 # UI
 # =========================
 uploaded_files = st.file_uploader(
-    "請上傳 SGS PDF（可多選）",
+    "請上傳 SGS PDF Report（可一次多選）",
     type="pdf",
     accept_multiple_files=True
-)
-
-part_no = st.text_input(
-    "料號（同一批 Report 請填同一料號）",
-    placeholder="例如：S1-Substrate"
 )
 
 # =========================
 # 主流程
 # =========================
-if uploaded_files and part_no:
+if uploaded_files:
     rows = []
 
     for file in uploaded_files:
         full_text, pages_text = extract_text_and_pages(file)
 
-        record = {"PartNo": part_no}
+        record = {}
 
+        # 各檢測項目
         for item, keyword in ITEM_RULES.items():
             record[item] = extract_result(full_text, keyword)
 
+        # PFAS（是否有測）
         record["PFAS"] = extract_pfas(full_text)
 
+        # DATE（只看第一頁）
         raw_date = extract_date(pages_text[0])
         record["DATE"] = normalize_date(raw_date)
 
@@ -156,10 +154,10 @@ if uploaded_files and part_no:
 
     df_all = pd.DataFrame(rows)
 
-    # ===== 同料號彙總 =====
-    merged = {"PartNo": part_no}
+    # ===== 同批 PDF 彙總（最嚴格結果）=====
+    merged = {}
     for col in FINAL_COLUMNS:
-        if col in ["PartNo", "DATE", "PFAS"]:
+        if col in ["DATE", "PFAS"]:
             continue
         merged[col] = merge_results(df_all[col].tolist())
 
@@ -168,21 +166,18 @@ if uploaded_files and part_no:
 
     df_final = pd.DataFrame([merged], columns=FINAL_COLUMNS)
 
-    st.subheader("📊 彙總結果（同料號最嚴格）")
+    # ===== 顯示結果 =====
+    st.subheader("📊 彙總結果（同批 SGS Report）")
     st.dataframe(df_final, use_container_width=True)
 
     # ===== Excel 匯出 =====
-    import io
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_final.to_excel(writer, sheet_name="SGS_Result", index=False)
 
     st.download_button(
         "⬇️ 下載公司制式 Excel",
         output.getvalue(),
-        file_name=f"{part_no}_SGS_Result.xlsx",
+        file_name="SGS_Test_Result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
-elif uploaded_files and not part_no:
-    st.warning("⚠️ 請先輸入料號，才能進行彙總")
