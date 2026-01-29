@@ -78,9 +78,9 @@ def find_report_start_page(pdf):
             return i
     return 0
 
-def extract_dates_v60_3(text):
+def extract_dates_v60_5(text):
     """
-    v60.3: 萬能清洗 (含中文) + 積分過濾
+    v60.5: 萬能清洗 (含中文) + 積分過濾
     """
     lines = text.split('\n')
     candidates = [] # (score, date_object)
@@ -206,7 +206,6 @@ def identify_columns_by_company(table, company):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            # v60.3: 簡中標題支援
             if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt:
                 if item_idx == -1: item_idx = c_idx
             if "mdl" in txt or "loq" in txt:
@@ -255,9 +254,10 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # --- v60.3: 事前掃毒 (Pre-scan Block) ---
-            # 1. Cd 防禦 (針對 HBCDD)
-            if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane"]): 
+            # --- v60.5: 事前掃毒 (Pre-scan Block) ---
+            # 1. Cd 防禦 (針對 HBCDD / ECD / PAHs)
+            # v60.5 新增: "indeno", "pyrene" (防 PAHs)
+            if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno", "pyrene"]): 
                 continue 
             
             # 2. F 防禦 (針對 全氟化合物)
@@ -265,8 +265,11 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
                 continue
             
             # 3. Br 防禦 (針對 PBB/PBDE/HBCDD)
-            # 嚴格封鎖所有可能被誤判為鹵素溴的有機溴字根
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): 
+                continue
+            
+            # 4. Pb 防禦 (防止吃掉 PBB)
+            if key == "Pb" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]):
                 continue
 
             for kw in keywords:
@@ -276,6 +279,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
             if matched_simple: break
         
         matched_group = None
+        # 注意：如果不檢查 Pb，或 Pb 被防禦了，程式才會走到這裡檢查 PBB，這樣 PBB 就不會被吃掉
         if not matched_simple:
             for group_key, keywords in GROUP_KEYWORDS.items():
                 if targets and group_key not in targets: continue
@@ -345,7 +349,7 @@ def process_files(files):
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
                     if p_idx < start_page_idx + 5:
-                        dates = extract_dates_v60_3(page_txt)
+                        dates = extract_dates_v60_5(page_txt)
                         file_dates_candidates.extend(dates)
                 
                 if file_dates_candidates:
@@ -404,15 +408,18 @@ def process_files(files):
 
                             # 匹配邏輯
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
-                                # --- v60.3: 表格模式毒藥防禦 (Pre-scan Block) ---
-                                # 1. Cd 防禦
-                                if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane"]): 
+                                # --- v60.5: 表格模式毒藥防禦 ---
+                                # 1. Cd 防禦 (新增 PAHs 防禦)
+                                if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno", "pyrene"]): 
                                     continue
                                 # 2. F 防禦
                                 if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): 
                                     continue
                                 # 3. Br 防禦
                                 if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): 
+                                    continue
+                                # 4. Pb 防禦 (防止吃掉 PBB)
+                                if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]):
                                     continue
 
                                 for kw in keywords:
@@ -507,9 +514,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v60.3", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v60.3 中英雙殺防禦版)")
-st.info("💡 v60.3：全方位封鎖 F/Br/Cd 誤抓漏洞 (針對 HBCDD/PFOS/PBB)，不論中英文皆可精準排除。")
+st.set_page_config(page_title="SGS 報告聚合工具 v60.5", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v60.5 PAHs/PBB 修復版)")
+st.info("💡 v60.5：解決 PAHs 導致的 Cd 誤判，並修復 Pb 關鍵字吃掉 PBB 的問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -530,7 +537,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.3.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.5.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")
