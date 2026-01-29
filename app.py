@@ -6,10 +6,10 @@ from dateutil import parser
 import io
 
 st.set_page_config(page_title="SGS Report Parser", layout="wide")
-st.title("📄 SGS Report 檢測結果彙總工具 (修正版)")
+st.title("📄 SGS Report 檢測結果彙總工具 (馬來西亞修正版)")
 
 # =========================
-# 欄位定義（順序固定）
+# [cite_start]欄位定義（順序固定） [cite: 1, 2]
 # =========================
 ITEM_RULES = {
     "Pb": r"Lead\s*\(Pb\)",
@@ -47,73 +47,88 @@ def extract_text_and_pages(pdf_file):
             text = page.extract_text() or ""
             pages_text.append(text)
             full_text += text + "\n"
-    return full_text, pages_text
+    [cite_start]return full_text, pages_text [cite: 3]
 
 
 def extract_result(text, keyword):
     """
-    修正後的邏輯：
-    1. 先抓取關鍵字附近的文字。
-    2. 強力清除 CAS No (避免抓到 117-81-7 的 117)。
-    3. 強力清除 IEC 標準與年份 (避免抓到 2017)。
-    4. 優先判斷 N.D. (避免抓到後面的 MDL 數值如 2, 5, 50)。
-    5. 最後才抓取數值。
+    修正版 V4 (包含除噪與優先判定 N.D. 邏輯)：
+    1. 強力清洗：在讀取數據前，強制刪除 Max, MDL, CAS, Year 等干擾項。
+    2. N.D. 優先：只要偵測到 N.D. 變體，直接回傳標準 "N.D."，不看後續數字。
+    3. 抓取數值：只在沒有 N.D. 時才抓取剩餘的第一個數字。
     """
     lines = text.splitlines()
 
     for i, line in enumerate(lines):
-        # 找到關鍵字（例如 Lead, Cadmium）
+        # 步驟 A: 鎖定關鍵字所在的行
         if re.search(keyword, line, re.IGNORECASE):
-            # 抓取上下文（當行 + 後兩行）合併處理，處理跨行問題
-            context = " ".join(lines[i:i+3])
+            # 抓取上下文 (當行 + 下一行)，縮小範圍避免抓到隔壁欄位
+            context = " ".join(lines[i:i+2])
 
-            # --- 步驟 1: 清除干擾雜訊 (順序很重要) ---
+            # ==========================================
+            # 步驟 B: 手術室 - 強力切除干擾源 (順序很重要)
+            # ==========================================
             
-            # (A) 清除 CAS No. (例如 "(CAS No. 117-81-7)"，一定要在找數字前刪掉)
-            context = re.sub(r"\(?CAS\s*No\.?\s*[\d-]+\)?", " ", context, flags=re.IGNORECASE)
+            # 1. 切除單位 (mg/kg, ppm, %, wt%)
+            context = re.sub(r"mg/kg|ppm|%|wt%", " ", context, flags=re.IGNORECASE)
 
-            # (B) 清除 IEC 標準編號與年份 (例如 "IEC 62321-4:2013+A1:2017")
-            # 這會把 2017 這種年份清掉，避免汞 (Hg) 抓錯
+            # 2. 切除 CAS No. (例如 "(CAS No. 84-74-2)" -> 刪除整個括號內容)
+            # 避免抓到 84 或 117
+            context = re.sub(r"\(?CAS\s*No\.?[\s\d-]+\)?", " ", context, flags=re.IGNORECASE)
+
+            # 3. 切除 標準編號與年份 (例如 "IEC 62321-5:2013")
+            # 這一步非常關鍵，避免抓到 2013, 2017
             context = re.sub(r"IEC\s*62321[-\d:+A]*", " ", context, flags=re.IGNORECASE)
+            # 額外清除獨立的年份 (1990-2030)
+            context = re.sub(r"\b(19|20)\d{2}\b", " ", context)
 
-            # (C) 清除 Limit 限制值 (例如 "Max 1000")
-            context = re.sub(r"Max\s*\d+", " ", context, flags=re.IGNORECASE)
+            # 4. 切除 Limit / MDL 標籤與數值 (例如 "Max 1000", "MDL 2")
+            # 避免抓到 1000 或 2 (支援小數點)
+            context = re.sub(r"(Max|Limit|MDL|LOQ)\s*\d+(\.\d+)?", " ", context, flags=re.IGNORECASE)
 
-            # --- 步驟 2: 優先判斷結果狀態 ---
+            # ==========================================
+            # 步驟 C: 判斷結果 - N.D. 優先
+            # ==========================================
 
-            # 先找 N.D. (Not Detected)
-            # 只要看到 N.D. 就直接回傳，這樣就不會去抓後面的 MDL (例如 2, 5, 50)
-            if re.search(r"\bN\.?D\.?\b", context, re.IGNORECASE):
+            # 規則：詞界(\b) + N + 任意點或空 + D + 詞界 OR Not Detected
+            # 這可以抓到: "N.D.", "ND", "N. D.", "Not Detected"
+            nd_pattern = r"(\bN\s*\.?\s*D\s*\.?\b)|(Not\s*Detected)"
+            
+            if re.search(nd_pattern, context, re.IGNORECASE):
+                # 您的需求：不管原文寫什麼，統一回傳 "N.D."
                 return "N.D."
 
-            # 再找 NEGATIVE
+            # 判斷 NEGATIVE
             if re.search(r"NEGATIVE", context, re.IGNORECASE):
                 return "NEGATIVE"
 
-            # --- 步驟 3: 最後才抓數字 ---
+            # ==========================================
+            # 步驟 D: 抓取數值
+            # ==========================================
             
-            # 尋找剩下的數字 (包含小數點)
-            num = re.search(r"\b(\d+(\.\d+)?)\b", context)
-            if num:
-                value_str = num.group(1)
+            # 因為上面已經把 Max, MDL, Year 都刪了，
+            # 這裡抓到的第一個數字，極大機率就是真正的檢測結果
+            nums = re.findall(r"\b\d+(\.\d+)?\b", context)
+            
+            if nums:
+                # nums 回傳 list of tuples，取第一個匹配到的數字字串
+                found_value = nums[0][0] 
                 
-                # 防呆機制：過濾掉像年份的整數 (例如 2024, 2025)
-                # 如果抓到的數字是整數，且在 1990-2030 之間，很可能是漏網之魚的年份
+                # 最後一道防線：雖然前面已經刪了年份，但以防萬一再擋一次
                 try:
-                    val_float = float(value_str)
+                    val_float = float(found_value)
+                    # 如果抓到 2025 這種整數，且看起來像年份，就忽略
                     if 1990 <= val_float <= 2030 and val_float.is_integer():
-                        continue # 跳過這個數字，可能是年份
+                        continue 
+                    return found_value
                 except:
                     pass
-                
-                return value_str
 
     return ""
 
 
 def extract_pfas(text):
-    # 只要內文出現 PFAS 關鍵字，就視為有測
-    return "REPORT" if re.search(r"\bPFAS\b", text, re.IGNORECASE) else ""
+    [cite_start]return "REPORT" if re.search(r"\bPFAS\b", text, re.IGNORECASE) else "" [cite: 6]
 
 
 def extract_date(first_page_text):
@@ -122,25 +137,22 @@ def extract_date(first_page_text):
         first_page_text,
         re.IGNORECASE
     )
-    return match.group(2).strip() if match else ""
+    [cite_start]return match.group(2).strip() if match else "" [cite: 6]
 
 
 def normalize_date(date_text):
     if not date_text:
         return ""
     try:
-        # 嘗試解析日期格式
         dt = parser.parse(date_text, dayfirst=True)
         return dt.strftime("%Y/%m/%d")
     except:
-        return ""
+        [cite_start]return "" [cite: 7]
 
 
 def merge_results(values):
     """
-    彙總邏輯：
-    1. 如果有多個數值，取最大值。
-    2. 如果有 N.D. 或 NEGATIVE，優先級低於數值。
+    彙總邏輯：同批次取最大值，若有 N.D. 則優先級低於數值
     """
     nums = []
     has_nd = False
@@ -149,7 +161,6 @@ def merge_results(values):
     for v in values:
         if not v:
             continue
-        
         v_upper = str(v).upper()
         
         if "N.D." in v_upper:
@@ -163,45 +174,43 @@ def merge_results(values):
                 pass
 
     if nums:
-        return str(max(nums)) # 有數值回傳最大值
+        return str(max(nums))
     if has_neg:
         return "NEGATIVE"
     if has_nd:
         return "N.D."
-    
-    return ""
+    [cite_start]return "" [cite: 8, 9, 10]
 
 
 # =========================
-# 主流程 (UI)
+# UI 與主流程
 # =========================
 uploaded_files = st.file_uploader(
     "請上傳 SGS PDF Report（可一次多選）",
     type="pdf",
     accept_multiple_files=True
-)
+[cite_start]) [cite: 10]
 
 if uploaded_files:
     rows = []
 
     for file in uploaded_files:
-        # 讀取 PDF
         full_text, pages_text = extract_text_and_pages(file)
 
         record = {}
 
-        # 逐一抓取各檢測項目
+        # 各檢測項目
         for item, keyword in ITEM_RULES.items():
             record[item] = extract_result(full_text, keyword)
 
-        # PFAS 特別處理（是否有測）
+        # PFAS（是否有測）
         record["PFAS"] = extract_pfas(full_text)
 
         # DATE（只看第一頁）
         raw_date = extract_date(pages_text[0]) if pages_text else ""
         record["DATE"] = normalize_date(raw_date)
 
-        rows.append(record)
+        [cite_start]rows.append(record) [cite: 11]
 
     df_all = pd.DataFrame(rows)
 
@@ -211,20 +220,20 @@ if uploaded_files:
         for col in FINAL_COLUMNS:
             if col in ["DATE", "PFAS"]:
                 continue
-            # 確保欄位存在，避免報錯
+            # 確保欄位存在
             if col in df_all.columns:
                 merged[col] = merge_results(df_all[col].tolist())
             else:
                 merged[col] = ""
 
-        # PFAS: 只要有一份是 REPORT，結果就是 REPORT
+        # PFAS 邏輯
         merged["PFAS"] = "REPORT" if "REPORT" in df_all["PFAS"].tolist() else ""
         
-        # DATE: 取日期最大值 (最新的日期)
+        # DATE 邏輯 (取最新)
         valid_dates = [d for d in df_all["DATE"] if d]
         merged["DATE"] = max(valid_dates) if valid_dates else ""
 
-        df_final = pd.DataFrame([merged], columns=FINAL_COLUMNS)
+        [cite_start]df_final = pd.DataFrame([merged], columns=FINAL_COLUMNS) [cite: 12]
 
         # ===== 顯示結果 =====
         st.subheader("📊 彙總結果（同批 SGS Report）")
@@ -240,6 +249,6 @@ if uploaded_files:
             output.getvalue(),
             file_name="SGS_Test_Result.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        [cite_start]) [cite: 13]
     else:
-        st.warning("未偵測到任何資料，請檢查 PDF 內容。")
+        st.warning("無法讀取資料，請確認 PDF 內容。")
