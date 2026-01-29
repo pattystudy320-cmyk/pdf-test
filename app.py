@@ -5,29 +5,29 @@ import re
 from dateutil import parser
 import io
 
+# 設定頁面資訊
 st.set_page_config(page_title="SGS Report Parser", layout="wide")
-st.title("📄 SGS Report 檢測結果彙總工具 (座標切割版)")
+st.title("📄 SGS Report 檢測結果彙總工具 (最終邏輯版)")
 
 # =========================
-# 1. 測項關鍵字定義
+# 1. 欄位定義規則 (Regex)
 # =========================
-# 用來定位 Y 軸高度 (Row)
-ITEM_KEYWORDS = {
-    "Pb": "Lead",
-    "Cd": "Cadmium",
-    "Hg": "Mercury",
-    "CrVI": "Hexavalent Chromium",
-    "PBBs": "Sum of PBBs",
-    "PBDEs": "Sum of PBDEs",
-    "DEHP": "Di(2-ethylhexyl) phthalate",
-    "BBP": "Benzyl butyl phthalate",
-    "DBP": "Dibutyl phthalate",
-    "DIBP": "Diisobutyl phthalate",
-    "F": "Fluorine",
-    "CL": "Chlorine",
-    "BR": "Bromine",
-    "I": "Iodine",
-    "PFOS": "PFOS"
+ITEM_RULES = {
+    "Pb": r"Lead\s*\(Pb\)",
+    "Cd": r"Cadmium\s*\(Cd\)",
+    "Hg": r"Mercury\s*\(Hg\)",
+    "CrVI": r"Hexavalent Chromium",
+    "PBBs": r"Sum of PBBs",
+    "PBDEs": r"Sum of PBDEs",
+    "DEHP": r"DEHP|Di\(2-ethylhexyl\)\s*phthalate",
+    "BBP": r"BBP|Benzyl\s*butyl\s*phthalate",
+    "DBP": r"DBP|Dibutyl\s*phthalate",
+    "DIBP": r"DIBP|Diisobutyl\s*phthalate",
+    "F": r"\bFluorine\b",   # 加 \b 避免抓到部分單字
+    "CL": r"\bChlorine\b",
+    "BR": r"\bBromine\b",
+    "I": r"\bIodine\b",
+    "PFOS": r"PFOS"
 }
 
 FINAL_COLUMNS = [
@@ -38,119 +38,108 @@ FINAL_COLUMNS = [
 ]
 
 # =========================
-# 2. 核心功能：座標定位與切割
+# 2. 核心功能函式
 # =========================
 
-def get_result_column_x_range(page):
+def extract_text_and_pages(pdf_file):
+    """讀取 PDF 文字內容"""
+    full_text = ""
+    pages_text = []
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            pages_text.append(text)
+            full_text += text + "\n"
+    return full_text, pages_text
+
+def extract_result(text, keyword, item_name):
     """
-    掃描頁面標題，找出 'Result' 欄位的左右邊界 (X軸範圍)
-    回傳: (x0, x1) 或 None
+    最終版邏輯 V5 (數字計數法):
+    1. 找到關鍵字所在行。
+    2. 強力清除雜訊 (Year, CAS, Limit)。
+    3. 優先檢查 N.D.。
+    4. 計算剩餘數字數量：
+       - PBBs/PBDEs: 剩下 1 個數字 -> 視為 Result (因 MDL 為 -)。
+       - 其他項目: 剩下 1 個數字 -> 視為 MDL -> 回傳 N.D.。
+                 剩下 2 個數字 -> 第一個為 Result。
     """
-    words = page.extract_words()
-    
-    result_header = None
-    mdl_header = None
-    
-    # 尋找表頭關鍵字
-    for w in words:
-        text = w["text"].strip()
-        # 找 Result 標題
-        if text == "Result" or text == "Result(s)":
-            # 有時候表頭會有兩行，取最上面的
-            if result_header is None or w["top"] < result_header["top"]:
-                result_header = w
-        
-        # 找 MDL 標題 (作為右邊界)
-        if text == "MDL" or text == "LOQ":
-            if mdl_header is None or w["top"] < mdl_header["top"]:
-                mdl_header = w
-    
-    if result_header:
-        x0 = result_header["x0"] - 5  # 左邊界稍微寬一點，怕對齊誤差
-        
-        # 如果有找到 MDL，右邊界就是 MDL 的左邊
-        if mdl_header:
-            x1 = mdl_header["x0"] - 2 # 不要在邊界重疊，稍微留空
-        else:
-            # 沒找到 MDL，就假設一個寬度 (例如 80 單位)
-            x1 = x0 + 80 
+    lines = text.splitlines()
+
+    for i, line in enumerate(lines):
+        # 步驟 A: 鎖定關鍵字所在的行
+        if re.search(keyword, line, re.IGNORECASE):
+            # 抓取上下文 (當行 + 下一行)，縮小範圍
+            context = " ".join(lines[i:i+2])
+
+            # ==========================================
+            # 步驟 B: 手術室 - 強力切除雜訊
+            # ==========================================
             
-        return (x0, x1)
-    
-    return None
+            # 1. 切除單位
+            context = re.sub(r"mg/kg|ppm|%|wt%", " ", context, flags=re.IGNORECASE)
 
-def extract_value_by_crop(page, keyword, x_range):
-    """
-    已知 Result 欄位的 X 範圍 (x_range)，
-    搜尋 keyword (如 Cadmium) 的 Y 高度，
-    然後切割出該區域的文字。
-    """
-    if not x_range:
-        return ""
-    
-    result_x0, result_x1 = x_range
-    words = page.extract_words()
-    
-    # 1. 找到測項名稱的 Y 座標
-    target_row_top = None
-    target_row_bottom = None
-    
-    for w in words:
-        # 簡單模糊比對：只要測項關鍵字出現在字詞中
-        if keyword.lower() in w["text"].lower():
-            # 為了避免抓到內文，通常測項都在左側 (x < 300)
-            if w["x0"] < 300:
-                target_row_top = w["top"]
-                target_row_bottom = w["bottom"]
-                break # 找到就停，假設測項名稱只出現一次或取第一次出現
-    
-    if target_row_top is not None:
-        # 2. 定義切割框 (Bounding Box)
-        # (x0, top, x1, bottom)
-        # Y 軸稍微放寬一點 (+- 2)，避免切到字
-        crop_box = (
-            result_x0, 
-            target_row_top - 2, 
-            result_x1, 
-            target_row_bottom + 2
-        )
-        
-        try:
-            # 3. 執行切割並抓字
-            cropped_page = page.crop(crop_box)
-            text = cropped_page.extract_text()
-            return text.strip() if text else ""
-        except Exception:
-            # 發生切割錯誤 (例如座標超出範圍)
-            return ""
+            # 2. 切除 CAS No.
+            context = re.sub(r"\(?CAS\s*No\.?[\s\d-]+\)?", " ", context, flags=re.IGNORECASE)
 
-    return ""
+            # 3. 切除 標準編號與年份 (IEC 62321...:2017)
+            context = re.sub(r"IEC\s*62321[-\d:+A]*", " ", context, flags=re.IGNORECASE)
+            context = re.sub(r"\b(19|20)\d{2}\b", " ", context) # 移除 20xx 年份
 
-def normalize_result(value):
-    """
-    清洗結果：統一 N.D.，排除單位
-    """
-    if not value:
-        return ""
-    
-    val_str = str(value).strip()
-    
-    # 移除常見單位與雜訊
-    val_str = re.sub(r"mg/kg|ppm|%|wt%", "", val_str, flags=re.IGNORECASE)
-    
-    # 判斷 N.D. (包含 ND, N. D., Not Detected)
-    # 這裡使用寬鬆判定，只要有 N 和 D 且非單字一部分
-    if re.search(r"(\bN\s*\.?\s*D\s*\.?\b)|(Not\s*Detected)", val_str, re.IGNORECASE):
-        return "N.D."
-    
-    if "NEGATIVE" in val_str.upper():
-        return "NEGATIVE"
+            # 4. 切除 Limit / MDL 標籤與數值 (Max 1000, MDL 2)
+            context = re.sub(r"(Max|Limit|MDL|LOQ)\s*\d+(\.\d+)?", " ", context, flags=re.IGNORECASE)
 
-    # 抓取數字 (支援小數點)
-    match = re.search(r"\d+(\.\d+)?", val_str)
-    if match:
-        return match.group(0)
-    
+            # ==========================================
+            # 步驟 C: N.D. 判定 (最高優先級)
+            # ==========================================
+            
+            # 只要有 N 和 D，且非單字一部分 (例如 N.D., ND, N. D., Not Detected)
+            nd_pattern = r"(\bN\s*\.?\s*D\s*\.?\b)|(Not\s*Detected)"
+            if re.search(nd_pattern, context, re.IGNORECASE):
+                return "N.D."
+            
+            if re.search(r"NEGATIVE", context, re.IGNORECASE):
+                return "NEGATIVE"
+
+            # ==========================================
+            # 步驟 D: 數字計數法 (核心邏輯)
+            # ==========================================
+            
+            # 抓出剩餘的所有數字 (支援整數與小數)
+            nums = re.findall(r"\b\d+(?:\.\d+)?\b", context)
+            
+            if not nums:
+                # 沒數字也沒 N.D.，保守回傳 N.D.
+                return "N.D."
+
+            # --- 依照 Item 決定策略 ---
+            
+            # 特權項目: PBBs / PBDEs (MDL 可能是 Dash "-")
+            if item_name in ["PBBs", "PBDEs"]:
+                # 如果有數字，就直接抓第一個 (忽略只有一個數字只能是 MDL 的規則)
+                return nums[0]
+            
+            # 一般項目: Pb, Cd, F, Cl 等 (MDL 必填)
+            else:
+                if len(nums) >= 2:
+                    # 剩下兩個以上數字：[結果] [MDL]
+                    # 第一個是結果
+                    found_val = nums[0]
+                    # 防呆：如果是年份殘渣 (1990-2030 整數)，跳過
+                    try:
+                        f_val = float(found_val)
+                        if 1990 <= f_val <= 2030 and f_val.is_integer():
+                            # 如果第一個像是年份，且還有第二個數字，那就取第二個
+                            return nums[1]
+                    except:
+                        pass
+                    return found_val
+                
+                elif len(nums) == 1:
+                    # 只剩下一個數字！
+                    # 極大機率是 N.D. 沒抓到，剩下的這個是 MDL (如 2.0, 50.0)
+                    # 強制判定為 N.D.
+                    return "N.D."
+
     return ""
 
 def extract_pfas(text):
@@ -174,12 +163,16 @@ def normalize_date(date_text):
         return ""
 
 def merge_results(values):
+    """
+    彙總邏輯：取最大值，若有 N.D. 則優先級低於數值
+    """
     nums = []
     has_nd = False
     has_neg = False
 
     for v in values:
-        if not v: continue
+        if not v:
+            continue
         v_upper = str(v).upper()
         
         if "N.D." in v_upper:
@@ -201,11 +194,11 @@ def merge_results(values):
     return ""
 
 # =========================
-# 3. 主程式流程
+# 3. Streamlit 主程式介面
 # =========================
 
 uploaded_files = st.file_uploader(
-    "請上傳 SGS PDF Report (座標切割版)",
+    "請上傳 SGS PDF Report（可一次多選）",
     type="pdf",
     accept_multiple_files=True
 )
@@ -213,36 +206,14 @@ uploaded_files = st.file_uploader(
 if uploaded_files:
     rows = []
     for file in uploaded_files:
-        full_text = ""
-        pages_text = []
-        extracted_data = {key: [] for key in ITEM_KEYWORDS}
-        
-        with pdfplumber.open(file) as pdf:
-            for page in pdf.pages:
-                # 1. 收集全文 (給 PFAS 和 Date 用)
-                text = page.extract_text() or ""
-                full_text += text + "\n"
-                pages_text.append(text)
-                
-                # 2. 座標切割邏輯
-                # 先找出這頁有沒有 Result 欄位
-                x_range = get_result_column_x_range(page)
-                
-                if x_range:
-                    # 如果這頁有 Result 表頭，就去搜刮各個測項
-                    for item, keyword in ITEM_KEYWORDS.items():
-                        # 特別處理 PBBs/PBDEs 這種標題
-                        # 這裡使用精確關鍵字去對應高度
-                        raw_val = extract_value_by_crop(page, keyword, x_range)
-                        clean_val = normalize_result(raw_val)
-                        if clean_val:
-                            extracted_data[item].append(clean_val)
-        
-        # 整理單檔結果
+        full_text, pages_text = extract_text_and_pages(file)
         record = {}
-        for item in ITEM_KEYWORDS:
-            record[item] = merge_results(extracted_data[item])
 
+        # 抓取各項目，傳入 item key 以便區分特權邏輯
+        for item, keyword in ITEM_RULES.items():
+            record[item] = extract_result(full_text, keyword, item)
+
+        # 特殊項目與日期
         record["PFAS"] = extract_pfas(full_text)
         raw_date = extract_date(pages_text[0]) if pages_text else ""
         record["DATE"] = normalize_date(raw_date)
@@ -251,7 +222,7 @@ if uploaded_files:
 
     df_all = pd.DataFrame(rows)
 
-    # 彙總顯示
+    # 同批次彙總
     merged = {}
     if not df_all.empty:
         for col in FINAL_COLUMNS:
@@ -269,7 +240,8 @@ if uploaded_files:
 
         df_final = pd.DataFrame([merged], columns=FINAL_COLUMNS)
 
-        st.subheader("📊 彙總結果（座標切割版）")
+        # 顯示與下載
+        st.subheader("📊 彙總結果（同批 SGS Report）")
         st.dataframe(df_final, use_container_width=True)
 
         output = io.BytesIO()
