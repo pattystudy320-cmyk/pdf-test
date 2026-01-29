@@ -78,20 +78,23 @@ def find_report_start_page(pdf):
             return i
     return 0
 
-def extract_dates_v60_5(text):
+def extract_dates_v60_6(text):
     """
-    v60.5: 萬能清洗 (含中文) + 積分過濾
+    v60.6: 支援 Reported Date, 排除 Effective Date/Job Ref
     """
     lines = text.split('\n')
     candidates = [] # (score, date_object)
     
-    bonus_kw = ["report date", "issue date", "date:", "dated", "日期"]
+    # v60.6: 新增 reported date
+    bonus_kw = ["report date", "issue date", "date:", "dated", "日期", "reported date"]
+    # v60.6: 新增 effective date, job ref
     poison_kw = [
         "approve", "approved", "approval", "approver", 
         "check", "checked", "review", "reviewed",      
         "receive", "received", "receipt",
         "period", "testing period", "started", "from", "to ",
-        "承認", "核准", "檢驗", "收件", "接收", "有效", "expiry", "valid", "期間", "周期", "時間"
+        "承認", "核准", "檢驗", "收件", "接收", "有效", "expiry", "valid", "期間", "周期", "時間",
+        "effective date", "job ref"
     ]
 
     pat_ymd = r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(0?[1-9]|[12][0-9]|3[01])"
@@ -136,7 +139,8 @@ def extract_dates_v60_5(text):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
-        if n in [1000.0, 100.0, 50.0, 25.0, 10.0, 5.0, 2.0]: return True
+        # v60.6: 新增 8.0 (常見 Cr6+ MDL)
+        if n in [1000.0, 100.0, 50.0, 25.0, 10.0, 8.0, 5.0, 2.0]: return True
         return False
     except: return False
 
@@ -206,7 +210,8 @@ def identify_columns_by_company(table, company):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt:
+            # v60.6: 支援 "test parameter"
+            if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt or "test parameter" in txt:
                 if item_idx == -1: item_idx = c_idx
             if "mdl" in txt or "loq" in txt:
                 if mdl_idx == -1: mdl_idx = c_idx
@@ -224,13 +229,14 @@ def identify_columns_by_company(table, company):
                     if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
                         if result_idx == -1: result_idx = c_idx
     
-    if result_idx == -1 and company == "SGS":
-        if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
-            result_idx = mdl_idx + 1
+    # v60.6: 移除舊的 SGS 強制右邊邏輯，改由 process_files 的動態判斷接手
+    # if result_idx == -1 and company == "SGS":
+    #    if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
+    #        result_idx = mdl_idx + 1
 
     is_reference_table = False
     if is_msds_table: is_reference_table = True
-    elif result_idx == -1:
+    elif result_idx == -1 and mdl_idx == -1: # 如果連 MDL 都沒找到，且沒 Result，才視為參考表
         if "restricted substances" in full_header_text or "group name" in full_header_text or "substance name" in full_header_text:
             is_reference_table = True
         if company == "INTERTEK" and "limits" in full_header_text:
@@ -238,7 +244,7 @@ def identify_columns_by_company(table, company):
         if item_idx == -1:
             is_reference_table = True
 
-    return item_idx, result_idx, is_reference_table
+    return item_idx, result_idx, mdl_idx, is_reference_table # v60.6: 回傳 mdl_idx
 
 # --- 4. 核心：文字模式 ---
 
@@ -254,21 +260,20 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # --- v60.5: 事前掃毒 (Pre-scan Block) ---
-            # 1. Cd 防禦 (針對 HBCDD / ECD / PAHs)
-            # v60.5 新增: "indeno", "pyrene" (防 PAHs)
+            # --- v60.5: 事前掃毒 ---
+            # 1. Cd 防禦
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno", "pyrene"]): 
                 continue 
             
-            # 2. F 防禦 (針對 全氟化合物)
+            # 2. F 防禦
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): 
                 continue
             
-            # 3. Br 防禦 (針對 PBB/PBDE/HBCDD)
+            # 3. Br 防禦
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): 
                 continue
             
-            # 4. Pb 防禦 (防止吃掉 PBB)
+            # 4. Pb 防禦
             if key == "Pb" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]):
                 continue
 
@@ -279,7 +284,6 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
             if matched_simple: break
         
         matched_group = None
-        # 注意：如果不檢查 Pb，或 Pb 被防禦了，程式才會走到這裡檢查 PBB，這樣 PBB 就不會被吃掉
         if not matched_simple:
             for group_key, keywords in GROUP_KEYWORDS.items():
                 if targets and group_key not in targets: continue
@@ -349,7 +353,7 @@ def process_files(files):
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
                     if p_idx < start_page_idx + 5:
-                        dates = extract_dates_v60_5(page_txt)
+                        dates = extract_dates_v60_6(page_txt)
                         file_dates_candidates.extend(dates)
                 
                 if file_dates_candidates:
@@ -364,7 +368,7 @@ def process_files(files):
                     tables = page.extract_tables()
                     for table in tables:
                         if not table or len(table) < 2: continue
-                        item_idx, result_idx, is_skip_table = identify_columns_by_company(table, company)
+                        item_idx, result_idx, mdl_idx, is_skip_table = identify_columns_by_company(table, company)
                         if is_skip_table: continue 
                         
                         for row_idx, row in enumerate(table):
@@ -381,10 +385,24 @@ def process_files(files):
                             if "pvc" in item_name_lower or "polyvinyl" in item_name_lower: continue
 
                             result = ""
+                            # v60.6: 優先使用標題定位
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
-                            # v59.0 智慧行掃描
+                            # v60.6: 智慧 MDL 左右偵測 (當標題失效時)
+                            if (not result or parse_value_priority(result)[0] == 0) and mdl_idx != -1:
+                                # 檢查左邊 (-1) - 針對 SGS 馬來西亞
+                                if mdl_idx - 1 >= 0:
+                                    val_left = clean_row[mdl_idx - 1]
+                                    if parse_value_priority(val_left)[0] > 0:
+                                        result = val_left
+                                # 檢查右邊 (+1) - 針對 SGS 中國/台灣
+                                if (not result or parse_value_priority(result)[0] == 0) and mdl_idx + 1 < len(clean_row):
+                                    val_right = clean_row[mdl_idx + 1]
+                                    if parse_value_priority(val_right)[0] > 0:
+                                        result = val_right
+
+                            # v60.6: 最後防線 - 智慧行掃描
                             temp_priority = parse_value_priority(result)
                             if temp_priority[0] == 0: 
                                 found_better = False
@@ -409,16 +427,12 @@ def process_files(files):
                             # 匹配邏輯
                             for target_key, keywords in SIMPLE_KEYWORDS.items():
                                 # --- v60.5: 表格模式毒藥防禦 ---
-                                # 1. Cd 防禦 (新增 PAHs 防禦)
                                 if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno", "pyrene"]): 
                                     continue
-                                # 2. F 防禦
                                 if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): 
                                     continue
-                                # 3. Br 防禦
                                 if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): 
                                     continue
-                                # 4. Pb 防禦 (防止吃掉 PBB)
                                 if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]):
                                     continue
 
@@ -443,7 +457,7 @@ def process_files(files):
                                         file_group_data[group_key].append(priority)
                                         break
                 
-                # 3. 引擎 B: 文字模式 (v59.0 擴大救援)
+                # 3. 引擎 B: 文字模式
                 missing_targets = []
                 pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
                 if not pb_data: missing_targets.append("Pb")
@@ -514,9 +528,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v60.5", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v60.5 PAHs/PBB 修復版)")
-st.info("💡 v60.5：解決 PAHs 導致的 Cd 誤判，並修復 Pb 關鍵字吃掉 PBB 的問題。")
+st.set_page_config(page_title="SGS 報告聚合工具 v60.6", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v60.6 馬來西亞/新格式兼容版)")
+st.info("💡 v60.6：新增支援 SGS 馬來西亞格式 (Reported Date, Test Parameter)，並具備 MDL 左右欄位自動偵測功能。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -537,7 +551,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.5.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.6.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")
