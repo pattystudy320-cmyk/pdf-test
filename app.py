@@ -54,63 +54,64 @@ def extract_text_and_pages(pdf_file):
 
 def extract_result(text, keyword):
     """
-    修正版 V4 核心邏輯：
+    修正版 V4.1 (修復 IndexError 與引用標籤問題)：
     1. 強力清洗：在讀取數據前，強制刪除 Max, MDL, CAS, Year 等干擾項。
-    2. N.D. 優先：只要偵測到 N.D. 變體，直接回傳標準 "N.D."，不看後續數字。
-    3. 抓取數值：只在沒有 N.D. 時才抓取剩餘的第一個數字。
+    2. N.D. 優先：只要偵測到 N.D. 變體，直接回傳標準 "N.D."。
+    3. 抓取數值：修復 regex 抓取邏輯，避免空值錯誤。
     """
     lines = text.splitlines()
 
     for i, line in enumerate(lines):
         # 步驟 A: 鎖定關鍵字所在的行
         if re.search(keyword, line, re.IGNORECASE):
-            # 抓取上下文 (當行 + 下一行)，縮小範圍避免抓到隔壁欄位
+            # 抓取上下文 (當行 + 下一行)
             context = " ".join(lines[i:i+2])
 
             # ==========================================
-            # 步驟 B: 手術室 - 強力切除干擾源 (順序很重要)
+            # 步驟 B: 手術室 - 強力切除干擾源
             # ==========================================
             
             # 1. 切除單位 (mg/kg, ppm, %, wt%)
             context = re.sub(r"mg/kg|ppm|%|wt%", " ", context, flags=re.IGNORECASE)
 
-            # 2. 切除 CAS No. (例如 "(CAS No. 84-74-2)" -> 刪除整個括號內容)
+            # 2. 切除 CAS No.
             context = re.sub(r"\(?CAS\s*No\.?[\s\d-]+\)?", " ", context, flags=re.IGNORECASE)
 
-            # 3. 切除 標準編號與年份 (例如 "IEC 62321-5:2013")
+            # 3. 切除 標準編號與年份 (如 IEC 62321-5:2013)
             context = re.sub(r"IEC\s*62321[-\d:+A]*", " ", context, flags=re.IGNORECASE)
-            # 額外清除獨立的年份 (1990-2030)
-            context = re.sub(r"\b(19|20)\d{2}\b", " ", context)
+            context = re.sub(r"\b(19|20)\d{2}\b", " ", context) # 移除 19xx 或 20xx 年份
 
-            # 4. 切除 Limit / MDL 標籤與數值 (例如 "Max 1000", "MDL 2")
+            # 4. 切除 Limit / MDL 標籤與數值 (如 Max 1000, MDL 2)
             context = re.sub(r"(Max|Limit|MDL|LOQ)\s*\d+(\.\d+)?", " ", context, flags=re.IGNORECASE)
 
             # ==========================================
             # 步驟 C: 判斷結果 - N.D. 優先
             # ==========================================
 
-            # 規則：詞界(\b) + N + 任意點或空 + D + 詞界 OR Not Detected
+            # 寬鬆判定 N.D. (包含 ND, N. D., Not Detected)
             nd_pattern = r"(\bN\s*\.?\s*D\s*\.?\b)|(Not\s*Detected)"
             
             if re.search(nd_pattern, context, re.IGNORECASE):
                 return "N.D."
 
-            # 判斷 NEGATIVE
             if re.search(r"NEGATIVE", context, re.IGNORECASE):
                 return "NEGATIVE"
 
             # ==========================================
-            # 步驟 D: 抓取數值
+            # 步驟 D: 抓取數值 (修復 Bug 的部分)
             # ==========================================
             
-            # 因為上面已經把 Max, MDL, Year 都刪了，這裡抓到的通常就是結果
-            nums = re.findall(r"\b\d+(\.\d+)?\b", context)
+            # 修正後的 Regex：使用非捕捉群組 (?:\.\d+)? 確保 findall 回傳完整字串
+            nums = re.findall(r"\b\d+(?:\.\d+)?\b", context)
             
             if nums:
-                found_value = nums[0][0] 
+                # nums 現在會是一個字串列表，例如 ['50.0', '50']
+                # 我們直接取第一個
+                found_value = nums[0] 
+                
                 try:
                     val_float = float(found_value)
-                    # 最後防呆：如果抓到像年份的整數，忽略
+                    # 最後防呆：如果數字看起來像年份 (1990-2030) 且是整數，忽略它
                     if 1990 <= val_float <= 2030 and val_float.is_integer():
                         continue 
                     return found_value
@@ -140,9 +141,6 @@ def normalize_date(date_text):
         return ""
 
 def merge_results(values):
-    """
-    彙總邏輯：取最大值，若有 N.D. 則優先級低於數值
-    """
     nums = []
     has_nd = False
     has_neg = False
@@ -186,11 +184,9 @@ if uploaded_files:
         full_text, pages_text = extract_text_and_pages(file)
         record = {}
 
-        # 抓取各項目
         for item, keyword in ITEM_RULES.items():
             record[item] = extract_result(full_text, keyword)
 
-        # 特殊項目與日期
         record["PFAS"] = extract_pfas(full_text)
         raw_date = extract_date(pages_text[0]) if pages_text else ""
         record["DATE"] = normalize_date(raw_date)
@@ -199,7 +195,6 @@ if uploaded_files:
 
     df_all = pd.DataFrame(rows)
 
-    # 同批次彙總
     merged = {}
     if not df_all.empty:
         for col in FINAL_COLUMNS:
@@ -217,7 +212,6 @@ if uploaded_files:
 
         df_final = pd.DataFrame([merged], columns=FINAL_COLUMNS)
 
-        # 顯示與下載
         st.subheader("📊 彙總結果（同批 SGS Report）")
         st.dataframe(df_final, use_container_width=True)
 
