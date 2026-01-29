@@ -78,9 +78,9 @@ def find_report_start_page(pdf):
             return i
     return 0
 
-def extract_dates_v60_9(text):
+def extract_dates_v60_10(text):
     """
-    v60.9: 支援 Reported Date, 排除 Job Ref
+    v60.10: 支援 Reported Date, 排除 Job Ref
     """
     lines = text.split('\n')
     candidates = [] 
@@ -137,76 +137,83 @@ def extract_dates_v60_9(text):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
+        # v60.10: 這些數字如果單獨出現，很可能是 MDL 或 Limit，而非結果
         if n in [1000.0, 100.0, 50.0, 25.0, 10.0, 8.0, 5.0, 2.0]: return True
         return False
     except: return False
 
-def extract_dirty_value(val):
-    """
-    v60.9: 從髒數據中提取 N.D. 或數值
-    例如: "With reference to IEC... N.D." -> "N.D."
-    """
+def is_unit_or_method(val):
     val_lower = val.lower()
-    # 優先提取 N.D.
-    if "n.d." in val_lower or "not detected" in val_lower or "<" in val_lower:
-        return "N.D."
-    if "negative" in val_lower:
-        return "NEGATIVE"
-    
-    # 嘗試提取純數字 (避開年份如 2017)
-    # 這裡簡單處理: 如果包含數字且不包含 method 關鍵字太多的話... 
-    # 但如果是沾黏欄位，通常 method 關鍵字會很多。
-    # 策略: 如果沒找到 ND，但字串很長且包含 method 關鍵字，就放棄 (避免誤判 MDL)
-    if any(m in val_lower for m in ["iec", "iso", "reference", "method", "analysis"]):
-        # 這裡很危險，如果黏在一起的是 "Method... 123"，很難分。
-        # 暫時只救 N.D.，數值型沾黏比較少見且風險高
-        return ""
-        
-    return val
+    if any(u in val_lower for u in ["mg/kg", "ppm", "%", "unit"]): return True
+    if any(m in val_lower for m in ["iec", "iso", "epa", "reference", "with", "analysis", "performed", "method"]): return True
+    return False
+
+def extract_nd_from_dirty_string(text):
+    """
+    v60.10: 使用正則表達式從髒字串中強制提取 N.D.
+    解決 "With reference to... N.D." 的沾黏問題
+    """
+    # 匹配 N.D., Not Detected, Negative, < 數值
+    match = re.search(r"(?i)(\bN\.?D\.?|\bNot Detected|\bNegative|<\s*\d+)", text)
+    if match:
+        return match.group(1).upper()
+    return None
 
 def parse_value_priority(value_str):
+    """
+    回傳: (score, number_val, string_val)
+    Score: 0=無效, 5=數字, 10=N.D./Negative (權重最高)
+    """
     if not value_str: return (0, 0, "")
     
-    # v60.9: 先嘗試清洗髒數據
-    clean_val = extract_dirty_value(str(value_str).split('\n')[0].strip())
-    if not clean_val:
-        # 如果清洗後為空 (代表可能是純 Method 文字)，就回傳無效
-        # 但要注意，如果原本就是 "123"，extract_dirty_value 可能會回傳 "123" (如果沒觸發 method 關鍵字)
-        clean_val = str(value_str).split('\n')[0].strip()
+    # 1. 強力正則救援 (針對沾黏)
+    nd_rescue = extract_nd_from_dirty_string(str(value_str))
+    if nd_rescue:
+        # 如果找到 ND，直接給最高分 10
+        if "NEGATIVE" in nd_rescue:
+            return (10, 0, "NEGATIVE")
+        return (10, 0, "N.D.")
 
-    # 再次檢查是否為純 Method/Unit (雙重過濾)
-    val_lower = clean_val.lower()
-    if any(u in val_lower for u in ["mg/kg", "ppm", "%", "unit"]): return (0, 0, "")
-    if any(m in val_lower for m in ["iec", "iso", "epa", "reference", "with", "analysis", "performed", "method"]): 
-        # 如果還有 method 關鍵字 (且沒被 extract_dirty_value 救成 ND)，則視為無效
-        return (0, 0, "")
-
-    if "(" in clean_val and ")" in clean_val:
-        if re.search(r"\(\d+\)", clean_val):
-            clean_val = clean_val.split("(")[0].strip()
+    # 2. 標準清洗
+    raw_val = str(value_str).split('\n')[0].strip()
     
-    val = clean_val.replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
+    # 括號處理 (例如 "100 (Note 1)")
+    if "(" in raw_val and ")" in raw_val:
+        if re.search(r"\(\d+\)", raw_val):
+            raw_val = raw_val.split("(")[0].strip()
     
+    val = raw_val.replace("mg/kg", "").replace("ppm", "").replace("%", "").replace("µg/cm²", "").strip()
     if not val: return (0, 0, "")
+    
     val_lower = val.lower()
     
+    # 排除關鍵字
     if val_lower in ["result", "limit", "mdl", "loq", "rl", "unit", "004", "001", "no.1", "---", "-", "limits", "n.a.", "/"]: 
         return (0, 0, "")
     if re.search(r"\d+-\d+-\d+", val): return (0, 0, "") 
+    
+    # 如果還是包含 method 關鍵字，且沒被上面的 ND 救援抓到，視為無效
+    if is_unit_or_method(val): return (0, 0, "")
 
+    # 純數字
     num_only_match = re.search(r"^([\d\.]+)$", val)
     if num_only_match:
-        if is_suspicious_limit_value(num_only_match.group(1)): return (0, 0, "")
+        if is_suspicious_limit_value(num_only_match.group(1)): 
+            # 雖然是數字，但很像 MDL，給 0 分 (除非別無選擇)
+            # 這裡策略性過濾，讓 ND 優先勝出
+            return (0, 0, "") 
+        try:
+            # 有效數字給 5 分
+            return (5, float(num_only_match.group(1)), val)
+        except: pass
 
-    if "nd" in val_lower or "n.d." in val_lower or "<" in val_lower: return (1, 0, "N.D.")
-    if "negative" in val_lower or "陰性" in val_lower: return (2, 0, "NEGATIVE")
-    
+    # 包含數字與文字 (例如 "< 5")
     num_match = re.search(r"^([\d\.]+)(.*)$", val)
     if num_match:
         try:
-            number = float(num_match.group(1))
-            return (3, number, val)
+            return (5, float(num_match.group(1)), val)
         except: pass
+        
     return (0, 0, val)
 
 def check_pfas_in_summary(text):
@@ -226,16 +233,11 @@ def identify_company(text):
 # --- 3. 核心：表格識別 ---
 
 def identify_columns_smart(table):
-    """
-    v60.9: 智能內容定位 (Content-Based)
-    不依賴標題，直接掃描前幾行數據特徵
-    """
     item_idx = -1
     result_idx = -1
     
     max_scan_rows = min(5, len(table))
     
-    # 掃描每一欄
     for c_idx in range(len(table[0])):
         item_score = 0
         result_score = 0
@@ -245,28 +247,25 @@ def identify_columns_smart(table):
             if not cell_val: continue
             cell_lower = cell_val.lower()
             
-            # 檢查是否像 Item
             for klist in SIMPLE_KEYWORDS.values():
                 if any(k.lower() in cell_lower for k in klist):
                     item_score += 1
                     break
             
-            # 檢查是否像 Result
             p = parse_value_priority(cell_val)
-            if p[0] > 0: # 是有效數值或 ND
-                result_score += 1
+            if p[0] > 0: 
+                result_score += p[0] # 累加分數，ND(10分) 會比 數字(5分) 更容易被選中
         
-        # 簡單判定：如果某一欄 Item 特徵明顯，設為 item_idx
         if item_score >= 1 and item_idx == -1:
             item_idx = c_idx
-        # 如果某一欄 Result 特徵明顯，設為 result_idx
+        
+        # 尋找分數最高的欄位作為 Result
         if result_score >= 1 and result_idx == -1:
             result_idx = c_idx
             
     return item_idx, result_idx
 
 def identify_columns_by_company(table, company):
-    # 1. 嘗試標題定位 (Header-Based)
     item_idx = -1
     result_idx = -1
     mdl_idx = -1
@@ -289,7 +288,6 @@ def identify_columns_by_company(table, company):
             
             if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt or "test parameter" in txt:
                 if item_idx == -1: item_idx = c_idx
-            # v60.9: 模糊匹配 Test Parameter
             elif "test" in txt and "parameter" in txt:
                 if item_idx == -1: item_idx = c_idx
                 
@@ -309,7 +307,6 @@ def identify_columns_by_company(table, company):
                     if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
                         if result_idx == -1: result_idx = c_idx
     
-    # 2. v60.9: 如果標題定位失敗，啟動智能內容定位
     if (item_idx == -1 or result_idx == -1) and not is_msds_table:
         s_item, s_result = identify_columns_smart(table)
         if item_idx == -1: item_idx = s_item
@@ -329,9 +326,12 @@ def identify_columns_by_company(table, company):
 
 # --- 4. 核心：文字模式 ---
 
-def parse_text_lines(text, data_pool, file_group_data, filename, company, targets=None):
+def parse_text_lines_v60_10(text, data_pool, file_group_data, filename, company, targets=None):
+    """
+    v60.10: 支援跨行搜索 (Multi-line Lookahead)
+    """
     lines = text.split('\n')
-    for line in lines:
+    for i, line in enumerate(lines):
         line_clean = clean_text(line)
         line_lower = line_clean.lower()
         if not line_clean: continue
@@ -341,7 +341,7 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # --- v60.9: 事前掃毒 ---
+            # 毒藥檢測 (Pre-scan)
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno", "pyrene"]): 
                 continue 
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): 
@@ -368,33 +368,35 @@ def parse_text_lines(text, data_pool, file_group_data, filename, company, target
                 if matched_group: break
         
         if matched_simple or matched_group:
-            parts = line_clean.split()
-            if len(parts) < 2: continue
-            found_val = ""
-            for part in reversed(parts):
-                p_lower = part.lower()
-                # v60.9: 文字模式也要避開 Method 關鍵字, 但允許 ND
-                if "nd" in p_lower:
-                    found_val = "N.D."
-                    break
-                if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---", "unit", "mdl", "iec", "method"]: continue
-                
-                if re.match(r"^\d+.*$", part): 
-                    val_check = part.replace("▲", "").replace("△", "")
-                    try:
-                        f = float(val_check)
-                        if f not in [100.0, 1000.0, 50.0]:
-                            found_val = part
-                            break
-                    except: pass
+            # --- 跨行搜索邏輯 ---
+            # 嘗試在當前行及接下來的 3 行中尋找數值
+            found_priority = (0, 0, "")
             
-            if found_val:
-                priority = parse_value_priority(found_val)
-                if priority[0] == 0: continue
+            # 搜尋範圍: 當前行 i 到 i+3 (共4行)
+            search_limit = min(i + 4, len(lines))
+            for j in range(i, search_limit):
+                curr_line_parts = clean_text(lines[j]).split()
+                if len(curr_line_parts) < 1: continue
+                
+                # 倒序掃描每一行
+                for part in reversed(curr_line_parts):
+                    p_lower = part.lower()
+                    if p_lower in ["mg/kg", "ppm", "2", "5", "10", "50", "100", "1000", "0.1", "-", "---", "unit", "mdl", "iec", "method"]: continue
+                    
+                    # 嘗試解析
+                    p = parse_value_priority(part)
+                    if p[0] > 0:
+                        found_priority = p
+                        break # 找到數值，跳出文字掃描
+                
+                if found_priority[0] > 0:
+                    break # 找到數值，跳出行掃描
+
+            if found_priority[0] > 0:
                 if matched_simple:
-                    data_pool[matched_simple].append({"priority": priority, "filename": filename})
+                    data_pool[matched_simple].append({"priority": found_priority, "filename": filename})
                 elif matched_group:
-                    file_group_data[matched_group].append(priority)
+                    file_group_data[matched_group].append(found_priority)
 
 # --- 主程式 ---
 
@@ -429,7 +431,7 @@ def process_files(files):
                     page_txt = page.extract_text() or ""
                     full_text_content += page_txt + "\n"
                     if p_idx < start_page_idx + 5:
-                        dates = extract_dates_v60_9(page_txt)
+                        dates = extract_dates_v60_10(page_txt)
                         file_dates_candidates.extend(dates)
                 
                 if file_dates_candidates:
@@ -464,37 +466,33 @@ def process_files(files):
                             if result_idx != -1 and result_idx < len(clean_row):
                                 result = clean_row[result_idx]
                             
-                            # v60.9: 還是找不到？嘗試用 MDL 左右推算 (但這次會避開 Unit)
+                            # v60.10: 左右掃描 (避開純 MDL)
                             if (not result or parse_value_priority(result)[0] == 0) and mdl_idx != -1:
-                                for step in [1, 2]:
-                                    if mdl_idx - step >= 0:
-                                        val = clean_row[mdl_idx - step]
-                                        if parse_value_priority(val)[0] > 0:
-                                            result = val
-                                            break
-                                if not result or parse_value_priority(result)[0] == 0:
-                                    for step in [1, 2]:
-                                        if mdl_idx + step < len(clean_row):
-                                            val = clean_row[mdl_idx + step]
-                                            if parse_value_priority(val)[0] > 0:
-                                                result = val
-                                                break
+                                best_neighbor = ""
+                                best_score = 0
+                                # 檢查左右各2格
+                                for step in [-2, -1, 1, 2]:
+                                    idx = mdl_idx + step
+                                    if 0 <= idx < len(clean_row):
+                                        val = clean_row[idx]
+                                        p = parse_value_priority(val)
+                                        # 如果找到 N.D. (10分)，直接贏過 數字 (5分)
+                                        if p[0] > best_score:
+                                            best_score = p[0]
+                                            best_neighbor = val
+                                if best_score > 0:
+                                    result = best_neighbor
 
-                            # v60.9: 最後防線 - 智慧行掃描 (parse_value_priority 已內建髒數據清洗)
+                            # v60.10: 智慧行掃描 (找最高分)
                             temp_priority = parse_value_priority(result)
-                            if temp_priority[0] == 0: 
-                                found_better = False
+                            if temp_priority[0] < 10: # 如果還沒找到 ND
                                 for cell in reversed(clean_row):
-                                    c_lower = cell.lower()
-                                    if not cell: continue
-                                    # v60.9: 即使黏在一起，parse_value_priority 也會嘗試救回 ND
                                     p = parse_value_priority(cell)
-                                    if p[0] > 0:
+                                    # 如果找到更高分的 (例如 ND > 數字)，就更新
+                                    if p[0] > temp_priority[0]:
                                         result = cell
-                                        found_better = True
-                                        break
-                                if not found_better and result_idx == -1: 
-                                    pass 
+                                        temp_priority = p
+                                        if p[0] == 10: break # 找到 ND 就不用找了
 
                             priority = parse_value_priority(result)
                             if priority[0] == 0: continue 
@@ -531,7 +529,7 @@ def process_files(files):
                                         file_group_data[group_key].append(priority)
                                         break
                 
-                # 3. 引擎 B: 文字模式 (v60.9 擴大救援)
+                # 3. 引擎 B: 文字模式 (v60.10 強力救援)
                 missing_targets = []
                 pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
                 if not pb_data: missing_targets.append("Pb")
@@ -543,10 +541,9 @@ def process_files(files):
                 pfos_data = [d for d in data_pool["PFOS"] if d['filename'] == filename]
                 
                 trigger_rescue = False
-                # v60.9: 只要是 SGS，且缺數據，就啟動
                 if company == "SGS":
                     if not pb_data: trigger_rescue = True
-                    # v60.9: 無鹵救援條件放寬，只要 halogen 數據沒抓齊 (小於4個) 就觸發
+                    # v60.10: 只要表格沒抓齊無鹵，且有 Combustion+Chromatography，就啟動
                     ft_lower = full_text_content.lower()
                     if ("halogen" in ft_lower or "卤素" in ft_lower or ("combustion" in ft_lower and "chromatography" in ft_lower)) and len(halogen_data) < 4:
                         trigger_rescue = True
@@ -556,7 +553,7 @@ def process_files(files):
                         missing_targets.append("PFOS")
 
                 if trigger_rescue:
-                     parse_text_lines(full_text_content, data_pool, file_group_data, filename, company, targets=None)
+                     parse_text_lines_v60_10(full_text_content, data_pool, file_group_data, filename, company, targets=None)
                      
                      for d in data_pool["Pb"]:
                          if d['filename'] == filename:
@@ -605,9 +602,9 @@ def process_files(files):
     return [final_row]
 
 # --- 介面 ---
-st.set_page_config(page_title="SGS 報告聚合工具 v60.9", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v60.9 內容為王版)")
-st.info("💡 v60.9：新增智能內容定位與髒數據清洗功能，無視欄位沾黏或標題錯誤，強力抓取 SGS 馬來西亞版數據。")
+st.set_page_config(page_title="SGS 報告聚合工具 v60.10", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v60.10 跨行搜索/N.D.優先版)")
+st.info("💡 v60.10：加入跨行搜索解決無鹵報告換行問題，並以 N.D. 權重優先解決 RoHS 誤抓 MDL 問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -628,7 +625,7 @@ if uploaded_files:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Summary')
         
-        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.9.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 下載 Excel", data=output.getvalue(), file_name="SGS_Summary_v60.10.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         
     except Exception as e:
         st.error(f"系統錯誤: {e}")
