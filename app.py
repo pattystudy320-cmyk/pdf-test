@@ -356,39 +356,15 @@ def process_standard_engine(pdf, filename, company):
                             file_group_data[group_key].append(priority)
                             break
 
-    # Text Rescue (SGS Only)
-    if company == "SGS":
-        missing_targets = []
-        pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
-        halogen_data = []
-        for h in ["F", "CL", "BR", "I"]:
-            halogen_data.extend([d for d in data_pool[h] if d['filename'] == filename])
-        pfos_data = [d for d in data_pool["PFOS"] if d['filename'] == filename]
-        
-        trigger_rescue = False
-        if not pb_data: trigger_rescue = True
-        if ("halogen" in full_text_content.lower() or "卤素" in full_text_content) and not halogen_data:
-            trigger_rescue = True
-        if "pfos" in full_text_content.lower() and not pfos_data:
-            trigger_rescue = True
-
-        if trigger_rescue:
-             parse_text_lines_v60(full_text_content, data_pool, file_group_data, filename, company, targets=None)
-
-    for group_key, values in file_group_data.items():
-        if values:
-            best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
-            data_pool[group_key].append({"priority": best_in_file, "filename": filename})
-
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v63.2: 萬能分隔符 + v62.8 鹵素邏輯)
+# 4. CTI 專用引擎 (v63.3: 回歸 v62.4 暴力清洗邏輯)
 # =============================================================================
 
-def extract_dates_v63_2_cti(text):
+def extract_dates_v63_3_cti(text):
     """
-    v63.2: 使用 [\W_]+ 作為萬能分隔符，無視點、空格、逗號的差異
+    v63.3: 暴力清洗法 (先將 ., 轉為空格，再匹配) - 復刻 v62.4
     """
     lines = text.split('\n')
     candidates = []
@@ -396,9 +372,8 @@ def extract_dates_v63_2_cti(text):
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期", "签发日期"]
     poison_kw = ["approve", "approved", "receive", "received", "receipt", "period", "expiry", "valid", "testing", "检测周期", "收样", "test period"]
 
-    # 萬能分隔符模式
-    # Month + (any separator) + Day + (any separator) + Year
-    pat_wildcard = r"([a-zA-Z]{3,})[\W_]+(3[01]|[12][0-9]|0?[1-9])[\W_]+(20\d{2})"
+    # v62.4 的勝利方程式: 清洗後只找空格分隔的 (英文月 + 日 + 年)
+    pat_mdy_clean = r"([a-zA-Z]{3,})\s+(3[01]|[12][0-9]|0?[1-9])\s+(20\d{2})"
     
     pat_ymd = r"(20\d{2})[\.\/-](0?[1-9]|1[0-2])[\.\/-](3[01]|[12][0-9]|0?[1-9])"
     pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
@@ -413,19 +388,7 @@ def extract_dates_v63_2_cti(text):
         elif any(good in line_lower for good in bonus_kw): 
             score = 100 
 
-        # 1. 萬能分隔符匹配 (針對 Jan. 8, 2025 或 Jan 8 2025)
-        matches_wild = re.finditer(pat_wildcard, line)
-        for m in matches_wild:
-            try:
-                mon_str = m.group(1)
-                dt_str = f"{mon_str} {m.group(2)} {m.group(3)}" # 重組成標準格式
-                for fmt in ["%b %d %Y", "%B %d %Y"]:
-                    try:
-                        dt = datetime.strptime(dt_str, fmt)
-                        if is_valid_date(dt): candidates.append((score, dt))
-                    except: pass
-            except: pass
-
+        # 1. 中文與點號格式 (標準匹配)
         matches_cn = re.finditer(pat_chinese, line)
         for m in matches_cn:
             try:
@@ -440,12 +403,28 @@ def extract_dates_v63_2_cti(text):
                 if is_valid_date(dt): candidates.append((score, dt))
             except: pass
 
-        # YMD 清洗匹配
-        clean_line = line.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
-        clean_line = clean_line.replace("年", " ").replace("月", " ").replace("日", " ")
-        clean_line = " ".join(clean_line.split())
+        # 2. 暴力清洗 (Brute Force Cleaning) -> 針對 C5191 英文日期
+        # 將所有 . 和 , 都變成空格，不管它們在哪
+        clean_line = line.replace(".", " ").replace(",", " ") 
         
-        matches = re.finditer(pat_ymd, clean_line)
+        # 英文 MDY
+        matches_mdy = re.finditer(pat_mdy_clean, clean_line)
+        for m in matches_mdy:
+            try:
+                dt_str = f"{m.group(1)} {m.group(2)} {m.group(3)}"
+                for fmt in ["%b %d %Y", "%B %d %Y"]:
+                    try:
+                        dt = datetime.strptime(dt_str, fmt)
+                        if is_valid_date(dt): candidates.append((score, dt))
+                    except: pass
+            except: pass
+
+        # YMD
+        # 對 YMD 做進一步清洗 (去除 - /)
+        clean_line_ymd = clean_line.replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
+        clean_line_ymd = " ".join(clean_line_ymd.split())
+        
+        matches = re.finditer(r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(3[01]|[12][0-9]|0?[1-9])", clean_line_ymd)
         for m in matches:
             try:
                 dt_str = " ".join(m.groups())
@@ -458,11 +437,11 @@ def extract_dates_v63_2_cti(text):
 def process_cti_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     
-    # 1. 日期提取 (v63.2 邏輯)
+    # 1. 日期提取 (v63.3 邏輯)
     text_for_dates = ""
     for p in pdf.pages[:3]: text_for_dates += (p.extract_text() or "") + "\n"
     
-    date_candidates = extract_dates_v63_2_cti(text_for_dates)
+    date_candidates = extract_dates_v63_3_cti(text_for_dates)
     final_dates = []
     if date_candidates:
         valid_only = [d for s, d in date_candidates if s > -500] 
@@ -703,9 +682,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.2", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.2 CTI 萬能分隔符版)")
-st.info("💡 v63.2：日期引擎採用萬能分隔符 (無視點/逗號/空格)，鹵素引擎維持 v62.8 設定。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.3", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.3 CTI 暴力清洗回歸版)")
+st.info("💡 v63.3：CTI 日期引擎回歸 v62.4 暴力清洗邏輯 (解決 Jan. 8 格式)，鹵素維持 v62.8 設定。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -727,7 +706,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.2.xlsx",
+            file_name="SGS_CTI_Summary_v63.3.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
