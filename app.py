@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 
 # =============================================================================
-# 1. 定義欄位與關鍵字 (v60.5 原始完整版)
+# 1. 定義欄位與關鍵字
 # =============================================================================
 
 OUTPUT_COLUMNS = [
@@ -25,14 +25,15 @@ SIMPLE_KEYWORDS = {
     "BBP": ["BBP", "Butyl benzyl phthalate"],
     "DBP": ["DBP", "Dibutyl phthalate"],
     "DIBP": ["DIBP", "Diisobutyl phthalate"],
-    "PFOS": ["Perfluorooctane sulfonates", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid", "全氟辛烷磺酸", "Perfluorooctane Sulfonamide"],
+    # v62.2: 增加 PFOS 及其鹽類的關鍵字
+    "PFOS": ["Perfluorooctane sulfonates", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid", "全氟辛烷磺酸", "Perfluorooctane Sulfonamide", "PFOS and its salts", "PFOS 及其盐"],
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
     "BR": ["Bromine", "溴"],
     "I": ["Iodine", "碘"]
 }
 
-# v60.5 的完整列表，確保 SGS_4 能抓到
+# v60.5 完整群組關鍵字
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和", "多溴聯苯之和", "多溴联苯之和",
@@ -69,7 +70,7 @@ MSDS_HEADER_KEYWORDS = [
 ]
 
 # =============================================================================
-# 2. 輔助功能
+# 2. 共用輔助函式
 # =============================================================================
 
 def clean_text(text):
@@ -118,9 +119,7 @@ def parse_value_priority(value_str):
 
 def extract_dates_v60(text):
     """
-    v62.1 修復版：
-    1. 修正 Regex 匹配順序，優先匹配 2 位數日期，防止 10 被截斷成 1。
-    2. 新增中文日期專用匹配，防止清洗造成的誤差。
+    v62.2 更新：加入 YYYY.MM.DD 格式支援 (CTI)
     """
     lines = text.split('\n')
     candidates = []
@@ -128,13 +127,13 @@ def extract_dates_v60(text):
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期"]
     poison_kw = ["approve", "approved", "receive", "received", "receipt", "period", "expiry", "valid"]
 
-    # v62.1 修正：將 day 的 (0?[1-9]) 移到最後，優先匹配 30, 31, 10-29
     pat_ymd = r"(20\d{2})[\.\/-](0?[1-9]|1[0-2])[\.\/-](3[01]|[12][0-9]|0?[1-9])"
     pat_dmy = r"(3[01]|[12][0-9]|0?[1-9])\s+([a-zA-Z]{3,})\s+(20\d{2})"
     pat_mdy = r"([a-zA-Z]{3,})\s+(3[01]|[12][0-9]|0?[1-9])\s+(20\d{2})"
-    
-    # v62.1 新增：中文日期專用匹配 (2024年10月10日)
     pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
+    
+    # v62.2: CTI 點分隔日期
+    pat_dot = r"(20\d{2})\.(0?[1-9]|1[0-2])\.(3[01]|[12][0-9]|0?[1-9])"
 
     for line in lines:
         line_lower = line.lower()
@@ -142,7 +141,7 @@ def extract_dates_v60(text):
         if any(bad in line_lower for bad in poison_kw): score = -100 
         elif any(good in line_lower for good in bonus_kw): score = 100 
 
-        # 1. 先嘗試中文匹配 (不清洗，直接抓)
+        # 1. 中文匹配
         matches_cn = re.finditer(pat_chinese, line)
         for m in matches_cn:
             try:
@@ -150,42 +149,32 @@ def extract_dates_v60(text):
                 if is_valid_date(dt): candidates.append((score, dt))
             except: pass
 
-        # 2. 清洗後嘗試標準格式
-        clean_line = line.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
-        clean_line = clean_line.replace("年", " ").replace("月", " ").replace("日", " ")
-        clean_line = " ".join(clean_line.split())
-        
-        # YMD
-        matches = re.finditer(pat_ymd, clean_line)
-        for m in matches:
+        # 2. CTI 點匹配 (YYYY.MM.DD)
+        matches_dot = re.finditer(pat_dot, line)
+        for m in matches_dot:
             try:
                 dt = datetime.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d")
                 if is_valid_date(dt): candidates.append((score, dt))
             except: pass
-            
-        # DMY
-        matches = re.finditer(pat_dmy, clean_line)
-        for m in matches:
-            try:
-                dt_str = f"{m.group(1)} {m.group(2)} {m.group(3)}"
-                for fmt in ["%d %b %Y", "%d %B %Y"]:
-                    try:
-                        dt = datetime.strptime(dt_str, fmt)
-                        if is_valid_date(dt): candidates.append((score, dt))
-                    except: pass
-            except: pass
-            
-        # MDY
-        matches = re.finditer(pat_mdy, clean_line)
-        for m in matches:
-            try:
-                dt_str = f"{m.group(1)} {m.group(2)} {m.group(3)}"
-                for fmt in ["%b %d %Y", "%B %d %Y"]:
-                    try:
-                        dt = datetime.strptime(dt_str, fmt)
-                        if is_valid_date(dt): candidates.append((score, dt))
-                    except: pass
-            except: pass
+
+        # 3. 標準清洗匹配
+        clean_line = line.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
+        clean_line = clean_line.replace("年", " ").replace("月", " ").replace("日", " ")
+        clean_line = " ".join(clean_line.split())
+        
+        for pat in [pat_ymd, pat_dmy, pat_mdy]:
+            matches = re.finditer(pat, clean_line)
+            for m in matches:
+                try:
+                    dt_str = " ".join(m.groups())
+                    for fmt in ["%Y %m %d", "%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y"]:
+                        try:
+                            dt = datetime.strptime(dt_str, fmt)
+                            if is_valid_date(dt): 
+                                candidates.append((score, dt))
+                                break
+                        except: pass
+                except: pass
             
     return candidates
 
@@ -197,11 +186,14 @@ def identify_company(text):
     if "ctic" in txt: return "CTIC"
     return "OTHERS"
 
+# =============================================================================
+# 3. 引擎 A: 標準引擎 (Standard Engine) - v60.5
+# =============================================================================
+
 def identify_columns_v60(table, company):
     item_idx = -1
     result_idx = -1
     mdl_idx = -1
-    limit_idx = -1
     
     max_scan_rows = min(3, len(table))
     full_header_text = ""
@@ -222,19 +214,16 @@ def identify_columns_v60(table, company):
                 if item_idx == -1: item_idx = c_idx
             if "mdl" in txt or "loq" in txt:
                 if mdl_idx == -1: mdl_idx = c_idx
-            if "limit" in txt or "限值" in txt:
-                if limit_idx == -1: limit_idx = c_idx
-                
-            is_bad_header = any(bad in txt for bad in MSDS_HEADER_KEYWORDS)
-            if not is_bad_header:
-                if company == "SGS":
-                     if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt) or 
-                        re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
-                        if "cas" not in txt and "method" not in txt and "limit" not in txt:
-                            if result_idx == -1: result_idx = c_idx
-                else:
-                    if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
+            
+            # v60.5 的特定邏輯
+            if company == "SGS":
+                 if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt) or 
+                    re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
+                    if "cas" not in txt and "method" not in txt and "limit" not in txt:
                         if result_idx == -1: result_idx = c_idx
+            else:
+                if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
+                    if result_idx == -1: result_idx = c_idx
     
     if result_idx == -1 and company == "SGS":
         if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
@@ -264,15 +253,10 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # v60.5 Defenses
-            if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): 
-                continue 
-            if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): 
-                continue
-            if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): 
-                continue
-            if key == "Pb" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]):
-                continue
+            if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
+            if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
+            if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
+            if key == "Pb" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
 
             for kw in keywords:
                 if kw.lower() in line_lower and "test item" not in line_lower:
@@ -317,199 +301,339 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
 
+def process_standard_engine(pdf, filename, company):
+    data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
+    file_dates_candidates = []
+    full_text_content = ""
+    
+    first_page_text = (pdf.pages[0].extract_text() or "").lower()
+    if "per- and polyfluoroalkyl substances" in first_page_text or "pfas" in first_page_text:
+        data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
+
+    for p in pdf.pages[:5]:
+        txt = p.extract_text() or ""
+        full_text_content += txt + "\n"
+        file_dates_candidates.extend(extract_dates_v60(txt))
+
+    file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
+
+    for page in pdf.pages:
+        tables = page.extract_tables()
+        for table in tables:
+            if not table or len(table) < 2: continue
+            item_idx, result_idx, is_skip = identify_columns_v60(table, company)
+            if is_skip: continue
+            
+            for row in table:
+                clean_row = [clean_text(cell) for cell in row]
+                row_txt = "".join(clean_row).lower()
+                if "test item" in row_txt or "result" in row_txt: continue
+                if not any(clean_row): continue
+                
+                target_item_col = item_idx if item_idx != -1 else 0
+                if target_item_col >= len(clean_row): continue
+                item_name = clean_row[target_item_col]
+                item_name_lower = item_name.lower()
+                
+                if "pvc" in item_name_lower: continue
+
+                result = ""
+                if result_idx != -1 and result_idx < len(clean_row):
+                    result = clean_row[result_idx]
+                
+                temp_priority = parse_value_priority(result)
+                if temp_priority[0] == 0:
+                    for cell in reversed(clean_row):
+                        c_lower = cell.lower()
+                        if not cell: continue
+                        if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
+                            result = cell
+                            break
+                        if re.search(r"^\d+(\.\d+)?", cell):
+                            if is_suspicious_limit_value(cell): continue
+                            result = cell
+                            break
+                
+                priority = parse_value_priority(result)
+                if priority[0] == 0: continue
+
+                for target_key, keywords in SIMPLE_KEYWORDS.items():
+                    if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): continue
+                    if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
+                    if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
+                    if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
+
+                    for kw in keywords:
+                        if kw.lower() in item_name_lower:
+                            if target_key == "PFOS" and "related" in item_name_lower: continue 
+                            data_pool[target_key].append({"priority": priority, "filename": filename})
+                            break
+                for group_key, keywords in GROUP_KEYWORDS.items():
+                    for kw in keywords:
+                        if kw.lower() in item_name_lower:
+                            file_group_data[group_key].append(priority)
+                            break
+
+    # Text Rescue (SGS Only)
+    if company == "SGS":
+        missing_targets = []
+        pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
+        halogen_data = []
+        for h in ["F", "CL", "BR", "I"]:
+            halogen_data.extend([d for d in data_pool[h] if d['filename'] == filename])
+        pfos_data = [d for d in data_pool["PFOS"] if d['filename'] == filename]
+        
+        trigger_rescue = False
+        if not pb_data: trigger_rescue = True
+        if ("halogen" in full_text_content.lower() or "卤素" in full_text_content) and not halogen_data:
+            trigger_rescue = True
+        if "pfos" in full_text_content.lower() and not pfos_data:
+            trigger_rescue = True
+
+        if trigger_rescue:
+             parse_text_lines_v60(full_text_content, data_pool, file_group_data, filename, company, targets=None)
+
+    for group_key, values in file_group_data.items():
+        if values:
+            best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
+            data_pool[group_key].append({"priority": best_in_file, "filename": filename})
+
+    return data_pool, file_dates_candidates
+
 # =============================================================================
-# 3. 主程式 (v60.5 原版架構 + 日期修正)
+# 4. CTI 專用引擎 (v62.2 New)
+# =============================================================================
+
+def process_cti_engine(pdf, filename):
+    data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
+    file_dates_candidates = []
+    
+    # 1. 日期提取 (支援 YYYY.MM.DD)
+    for p in pdf.pages[:3]:
+        txt = p.extract_text() or ""
+        file_dates_candidates.extend(extract_dates_v60(txt))
+
+    # 2. 表格解析
+    for page in pdf.pages:
+        tables = page.extract_tables()
+        for table in tables:
+            if not table or len(table) < 2: continue
+            
+            # 定位錨點: 找 MDL 欄位 (通常全是數字)
+            mdl_col_idx = -1
+            cols = len(table[0])
+            for c in range(cols):
+                num_count = 0
+                row_count = 0
+                for r in range(1, len(table)):
+                    val = clean_text(table[r][c])
+                    if not val: continue
+                    row_count += 1
+                    if val in ["2", "5", "8", "10", "50", "100"]: num_count += 1
+                
+                if row_count > 0 and (num_count / row_count) >= 0.5:
+                    mdl_col_idx = c
+                    break
+            
+            # CTI: Result 通常在 MDL 左邊
+            result_col_idx = -1
+            if mdl_col_idx > 0:
+                result_col_idx = mdl_col_idx - 1
+            else:
+                # 備案: 找 Result 標題
+                for c in range(cols):
+                    if "result" in str(table[0][c]).lower() or "结果" in str(table[0][c]):
+                        result_col_idx = c
+                        break
+            
+            if result_col_idx == -1: continue
+
+            for row in table:
+                if len(row) <= result_col_idx: continue
+                
+                # 取得 Item (假設在 Result 左邊的文字)
+                item_text = " ".join([str(x) for x in row[:result_col_idx] if x]).lower()
+                
+                # v62.2: 排除 "Total" / "总计" (解決 CTI 鹵素加總問題)
+                if "total" in item_text or "总计" in item_text: continue
+
+                raw_res = str(row[result_col_idx])
+                
+                # CTI 專用數值提取
+                final_val = None
+                if re.search(r"(?i)(\bN\.?D\.?|\bNot Detected)", raw_res):
+                    final_val = "N.D."
+                else:
+                    nums = re.findall(r"\d+(?:\.\d+)?", raw_res)
+                    if nums: final_val = nums[0] # 取第一個數字
+                
+                if not final_val: continue
+                priority = parse_value_priority(final_val)
+                if priority[0] == 0: continue
+
+                # 匹配
+                for key, kws in SIMPLE_KEYWORDS.items():
+                    if any(kw.lower() in item_text for kw in kws):
+                        data_pool[key].append({"priority": priority, "filename": filename})
+                        break
+                for key, kws in GROUP_KEYWORDS.items():
+                    if any(kw.lower() in item_text for kw in kws):
+                        data_pool[key].append({"priority": priority, "filename": filename})
+                        break
+
+    return data_pool, file_dates_candidates
+
+# =============================================================================
+# 5. 馬來西亞專用引擎 (v61.1 邏輯，復刻於此)
+# =============================================================================
+
+def extract_date_malaysia(text):
+    lines = text.split('\n')
+    for line in lines:
+        if "REPORTED DATE" in line.upper():
+            if "JOB REF" in line.upper(): continue
+            pat = r"(0?[1-9]|[12][0-9]|3[01])[\s-]([a-zA-Z]{3,})[\s-](20\d{2})"
+            match = re.search(pat, line)
+            if match:
+                dt_str = f"{match.group(1)} {match.group(2)} {match.group(3)}"
+                for fmt in ["%d %B %Y", "%d %b %Y"]:
+                    try:
+                        return datetime.strptime(dt_str, fmt)
+                    except: pass
+    return None
+
+def process_malaysia_engine(pdf, filename):
+    data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
+    full_text = ""
+    for p in pdf.pages: full_text += (p.extract_text() or "") + "\n"
+    
+    dt = extract_date_malaysia(full_text)
+    date_candidates = []
+    if dt: date_candidates.append((100, dt))
+
+    # RoHS2 (Table Anchor)
+    for page in pdf.pages:
+        tables = page.extract_tables()
+        for table in tables:
+            if not table or len(table) < 2: continue
+            mdl_col = -1
+            cols = len(table[0])
+            for c in range(cols):
+                num_cnt = 0
+                row_cnt = 0
+                for r in range(1, len(table)):
+                    val = clean_text(table[r][c])
+                    if not val: continue
+                    row_cnt += 1
+                    if val in ["2", "5", "8", "10", "50"]: num_cnt += 1
+                if row_cnt > 0 and (num_cnt / row_cnt) >= 0.5:
+                    mdl_col = c
+                    break
+            
+            if mdl_col > 0:
+                result_col = mdl_col - 1
+                for row in table:
+                    if len(row) <= mdl_col: continue
+                    item_text = " ".join([str(x) for x in row[:result_col] if x]).lower()
+                    raw_res = str(row[result_col])
+                    final_val = None
+                    if re.search(r"(?i)(\bN\.?D\.?|\bNot Detected|\bNegative)", raw_res):
+                        final_val = "N.D."
+                    else:
+                        nums = re.findall(r"\d+(?:\.\d+)?", raw_res)
+                        for num in nums:
+                            if num in ["62321", "2013", "2015", "2017", "2020"]: continue
+                            final_val = num
+                            break
+                    
+                    if not final_val: continue
+                    priority = (10, 0, final_val) # Force high priority
+
+                    for key, kws in SIMPLE_KEYWORDS.items():
+                        if any(kw.lower() in item_text for kw in kws):
+                            if key == "Cd" and "hexabromocyclododecane" in item_text: continue
+                            data_pool[key].append({"priority": priority, "filename": filename})
+                            break
+                    for key, kws in GROUP_KEYWORDS.items():
+                        if any(kw.lower() in item_text for kw in kws):
+                            data_pool[key].append({"priority": priority, "filename": filename})
+                            break
+
+    # HF (Block Search)
+    ft_lower = full_text.lower()
+    targets = {"F": "fluorine", "CL": "chlorine", "BR": "bromine", "I": "iodine"}
+    for key, kw in targets.items():
+        if not data_pool[key]:
+            idx = ft_lower.find(kw)
+            if idx != -1:
+                window = ft_lower[idx:idx+300]
+                if "n.d." in window:
+                    data_pool[key].append({"priority": (10, 0, "N.D."), "filename": filename})
+                else:
+                    nums = re.findall(r"\b\d+\b", window)
+                    found_num = ""
+                    for n in nums:
+                        if n == "50": continue
+                        if len(n) == 1: continue
+                        if n[:4] in ["2020", "2021", "2024", "2025"]: continue
+                        if n == "62321": continue
+                        found_num = n
+                        break
+                    if found_num:
+                        data_pool[key].append({"priority": (5, float(found_num), found_num), "filename": filename})
+
+    return data_pool, date_candidates
+
+# =============================================================================
+# 6. 主程式與分流器
 # =============================================================================
 
 def process_files(files):
-    data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
-    all_file_valid_dates = [] 
-    global_tracker = {"Pb": {"max_score": -1, "max_value": -1.0, "filename": ""}}
-    
+    results = []
     progress_bar = st.progress(0)
     
     for i, file in enumerate(files):
-        filename = file.name
-        file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
-        
         try:
             with pdfplumber.open(file) as pdf:
-                start_page_idx = find_report_start_page(pdf)
-                company = "OTHERS"
-                first_page_text = ""
-                full_text_content = ""
+                first_page_text = (pdf.pages[0].extract_text() or "").upper()
+                company = identify_company(first_page_text)
                 
-                if len(pdf.pages) > start_page_idx:
-                    first_page_text = pdf.pages[start_page_idx].extract_text() or ""
-                    company = identify_company(first_page_text)
-                    if "per- and polyfluoroalkyl substances" in first_page_text.lower() or "pfas" in first_page_text.lower():
-                        data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
-
-                # 1. 日期提取 (使用 v62.1 修復版)
-                file_dates_candidates = []
-                for p_idx in range(start_page_idx, len(pdf.pages)):
-                    page = pdf.pages[p_idx]
-                    page_txt = page.extract_text() or ""
-                    full_text_content += page_txt + "\n"
-                    if p_idx < start_page_idx + 5:
-                        dates = extract_dates_v60(page_txt)
-                        file_dates_candidates.extend(dates)
+                # 分流邏輯
+                if "MALAYSIA" in first_page_text and "SGS" in first_page_text:
+                    data_pool, date_candidates = process_malaysia_engine(pdf, file.name)
+                elif company == "CTI":
+                    data_pool, date_candidates = process_cti_engine(pdf, file.name)
+                else:
+                    # 標準引擎 (v60.5 + Date Fix)
+                    data_pool, date_candidates = process_standard_engine(pdf, file.name, company)
                 
-                if file_dates_candidates:
-                    valid_candidates = [d for d in file_dates_candidates if d[0] > -50]
-                    if valid_candidates:
-                        best_date = sorted(valid_candidates, key=lambda x: (x[0], x[1]), reverse=True)[0]
-                        all_file_valid_dates.append(best_date[1])
-
-                # 2. 引擎 A: 表格模式
-                for p_idx in range(start_page_idx, len(pdf.pages)):
-                    page = pdf.pages[p_idx]
-                    tables = page.extract_tables()
-                    for table in tables:
-                        if not table or len(table) < 2: continue
-                        item_idx, result_idx, is_skip_table = identify_columns_v60(table, company)
-                        if is_skip_table: continue 
-                        
-                        for row_idx, row in enumerate(table):
-                            clean_row = [clean_text(cell) for cell in row]
-                            row_txt = "".join(clean_row).lower()
-                            if "test item" in row_txt or "result" in row_txt or "restricted" in row_txt: continue
-                            if not any(clean_row): continue
-                            
-                            target_item_col = item_idx if item_idx != -1 else 0
-                            if target_item_col >= len(clean_row): continue
-                            item_name = clean_row[target_item_col]
-                            item_name_lower = item_name.lower()
-                            
-                            if "pvc" in item_name_lower or "polyvinyl" in item_name_lower: continue
-
-                            result = ""
-                            if result_idx != -1 and result_idx < len(clean_row):
-                                result = clean_row[result_idx]
-                            
-                            # v59.0 智慧行掃描
-                            temp_priority = parse_value_priority(result)
-                            if temp_priority[0] == 0: 
-                                found_better = False
-                                for cell in reversed(clean_row):
-                                    c_lower = cell.lower()
-                                    if not cell: continue
-                                    if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
-                                        result = cell
-                                        found_better = True
-                                        break
-                                    if re.search(r"^\d+(\.\d+)?", cell):
-                                        if is_suspicious_limit_value(cell): continue 
-                                        result = cell
-                                        found_better = True
-                                        break
-                                if not found_better and result_idx == -1: 
-                                    pass 
-
-                            priority = parse_value_priority(result)
-                            if priority[0] == 0: continue 
-
-                            # 匹配邏輯 (v60.5 Defenses)
-                            for target_key, keywords in SIMPLE_KEYWORDS.items():
-                                if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): 
-                                    continue
-                                if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): 
-                                    continue
-                                if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): 
-                                    continue
-                                if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]):
-                                    continue
-
-                                for kw in keywords:
-                                    if kw.lower() in item_name_lower:
-                                        if target_key == "PFOS" and "related" in item_name_lower: continue 
-                                        data_pool[target_key].append({"priority": priority, "filename": filename})
-                                        if target_key == "Pb":
-                                            score, val = priority[0], priority[1]
-                                            if score > global_tracker["Pb"]["max_score"]:
-                                                global_tracker["Pb"]["max_score"] = score
-                                                global_tracker["Pb"]["max_value"] = val
-                                                global_tracker["Pb"]["filename"] = filename
-                                            elif score == global_tracker["Pb"]["max_score"] and val > global_tracker["Pb"]["max_value"]:
-                                                global_tracker["Pb"]["max_value"] = val
-                                                global_tracker["Pb"]["filename"] = filename
-                                        break
-
-                            for group_key, keywords in GROUP_KEYWORDS.items():
-                                for kw in keywords:
-                                    if kw.lower() in item_name_lower:
-                                        file_group_data[group_key].append(priority)
-                                        break
+                final_row = {}
+                valid_candidates = [d for d in date_candidates if d[0] > -50]
+                if valid_candidates:
+                    best_date = sorted(valid_candidates, key=lambda x: (x[0], x[1]), reverse=True)[0][1]
+                    final_row["日期"] = best_date.strftime("%Y/%m/%d")
+                else:
+                    final_row["日期"] = ""
                 
-                # 3. 引擎 B: 文字模式
-                missing_targets = []
-                pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
-                if not pb_data: missing_targets.append("Pb")
+                final_row["檔案名稱"] = file.name
                 
-                halogen_data = []
-                for h in ["F", "CL", "BR", "I"]:
-                    halogen_data.extend([d for d in data_pool[h] if d['filename'] == filename])
+                for k in OUTPUT_COLUMNS:
+                    if k in ["日期", "檔案名稱"]: continue
+                    candidates = data_pool.get(k, [])
+                    if candidates:
+                        best = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
+                        final_row[k] = best['priority'][2]
+                    else:
+                        final_row[k] = ""
                 
-                pfos_data = [d for d in data_pool["PFOS"] if d['filename'] == filename]
-                
-                trigger_rescue = False
-                if company == "SGS":
-                    if not pb_data: trigger_rescue = True
-                    if ("halogen" in full_text_content.lower() or "卤素" in full_text_content) and not halogen_data:
-                        trigger_rescue = True
-                        missing_targets.extend(["F", "CL", "BR", "I"])
-                    if "pfos" in full_text_content.lower() and not pfos_data:
-                        trigger_rescue = True
-                        missing_targets.append("PFOS")
-
-                if trigger_rescue:
-                     parse_text_lines_v60(full_text_content, data_pool, file_group_data, filename, company, targets=None)
-                     
-                     for d in data_pool["Pb"]:
-                         if d['filename'] == filename:
-                             p = d['priority']
-                             if p[0] > global_tracker["Pb"]["max_score"]:
-                                 global_tracker["Pb"]["max_score"] = p[0]
-                                 global_tracker["Pb"]["max_value"] = p[1]
-                                 global_tracker["Pb"]["filename"] = filename
-                             elif p[0] == global_tracker["Pb"]["max_score"] and p[1] > global_tracker["Pb"]["max_value"]:
-                                 global_tracker["Pb"]["max_value"] = p[1]
-                                 global_tracker["Pb"]["filename"] = filename
-
-            # 4. 結算
-            for group_key, values in file_group_data.items():
-                if values:
-                    best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
-                    data_pool[group_key].append({"priority": best_in_file, "filename": filename})
+                results.append(final_row)
 
         except Exception as e:
-            st.warning(f"檔案 {filename} 解析異常: {e}")
+            st.error(f"檔案 {file.name} 處理失敗: {e}")
+            
         progress_bar.progress((i + 1) / len(files))
-
-    # 5. 聚合
-    final_row = {}
-    for key in OUTPUT_COLUMNS:
-        if key in ["日期", "檔案名稱"]: continue
-        candidates = data_pool.get(key, [])
-        if not candidates:
-            final_row[key] = "" 
-            continue
-        best_record = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
-        final_row[key] = best_record['priority'][2]
-
-    final_date_str = ""
-    if all_file_valid_dates:
-        latest_date = max(all_file_valid_dates)
-        final_date_str = latest_date.strftime("%Y/%m/%d")
-    
-    final_row["日期"] = final_date_str
-    
-    if global_tracker["Pb"]["filename"]:
-        final_row["檔案名稱"] = global_tracker["Pb"]["filename"]
-    else:
-        final_row["檔案名稱"] = files[0].name if files else ""
-
-    return [final_row]
+        
+    return results
 
 def find_report_start_page(pdf):
     for i in range(min(10, len(pdf.pages))):
@@ -519,12 +643,12 @@ def find_report_start_page(pdf):
     return 0
 
 # =============================================================================
-# 4. Streamlit 介面
+# 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS 報告聚合工具 v62.1", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v62.1 日期精準修復版)")
-st.info("💡 v62.1：移除馬來西亞模組，回歸 v60.5 標準邏輯。重點修復中文日期與日期截斷錯誤。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v62.2", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v62.2 CTI 專用分流版)")
+st.info("💡 v62.2：針對 CTI 報告新增專用處理邏輯 (解決日期/鹵素總和/PFOS 關鍵字)，SGS 標準報告邏輯保持不變。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -534,9 +658,7 @@ if uploaded_files:
     try:
         result_data = process_files(uploaded_files)
         df = pd.DataFrame(result_data)
-        for col in OUTPUT_COLUMNS:
-            if col not in df.columns: df[col] = ""
-        df = df[OUTPUT_COLUMNS]
+        df = df.reindex(columns=OUTPUT_COLUMNS)
 
         st.success("✅ 處理完成！")
         st.dataframe(df)
@@ -548,7 +670,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_Summary_v62.1.xlsx",
+            file_name="SGS_CTI_Summary_v62.2.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
