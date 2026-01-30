@@ -382,12 +382,12 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v62.9: Date Fix + v62.8 Logic)
+# 4. CTI 專用引擎 (v63.0: 復刻 v62.4 日期 + v62.8 鹵素)
 # =============================================================================
 
-def extract_dates_cti_v62_9(text):
+def extract_dates_v63_cti(text):
     """
-    v62.9: 優先掃描原始字串，支援 Jan. 8 和 Jan.8
+    v63.0: 完全復刻 v62.4 的日期提取邏輯 (針對 C5191 報告)
     """
     lines = text.split('\n')
     candidates = []
@@ -395,11 +395,9 @@ def extract_dates_cti_v62_9(text):
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期", "签发日期"]
     poison_kw = ["approve", "approved", "receive", "received", "receipt", "period", "expiry", "valid", "testing", "检测周期", "收样", "test period"]
 
-    # 針對 CTI 的原始掃描 (支援點與空格變化)
-    pat_mdy_raw = r"([a-zA-Z]{3,})\.?\s*(3[01]|[12][0-9]|0?[1-9]),?\s*(20\d{2})"
-    
-    # 傳統清洗後匹配
     pat_ymd = r"(20\d{2})[\.\/-](0?[1-9]|1[0-2])[\.\/-](3[01]|[12][0-9]|0?[1-9])"
+    # v62.4 核心: \s* 允許無空格 (Jan.8)
+    pat_mdy_en = r"([a-zA-Z]{3,})\.?\s*(3[01]|[12][0-9]|0?[1-9]),?\s*(20\d{2})"
     pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
     pat_dot = r"(20\d{2})\.(0?[1-9]|1[0-2])\.(3[01]|[12][0-9]|0?[1-9])"
 
@@ -412,8 +410,8 @@ def extract_dates_cti_v62_9(text):
         elif any(good in line_lower for good in bonus_kw): 
             score = 100 
 
-        # 1. 優先：原始字串掃描 (針對 C5191 Jan. 8)
-        matches_mdy = re.finditer(pat_mdy_raw, line)
+        # 優先：英文 MDY (原始字串匹配)
+        matches_mdy = re.finditer(pat_mdy_en, line)
         for m in matches_mdy:
             try:
                 mon_str = m.group(1).replace(".", "")
@@ -425,7 +423,7 @@ def extract_dates_cti_v62_9(text):
                     except: pass
             except: pass
 
-        # 2. 備用：中文與其他格式
+        # 中文與其他
         matches_cn = re.finditer(pat_chinese, line)
         for m in matches_cn:
             try:
@@ -440,29 +438,30 @@ def extract_dates_cti_v62_9(text):
                 if is_valid_date(dt): candidates.append((score, dt))
             except: pass
 
-        # 3. 清洗後掃描 (YMD)
+        # YMD 清洗匹配
         clean_line = line.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
         clean_line = clean_line.replace("年", " ").replace("月", " ").replace("日", " ")
         clean_line = " ".join(clean_line.split())
         
-        matches = re.finditer(pat_ymd, clean_line)
-        for m in matches:
-            try:
-                dt_str = " ".join(m.groups())
-                dt = datetime.strptime(dt_str, "%Y %m %d")
-                if is_valid_date(dt): candidates.append((score, dt))
-            except: pass
+        for pat in [pat_ymd]:
+            matches = re.finditer(pat, clean_line)
+            for m in matches:
+                try:
+                    dt_str = " ".join(m.groups())
+                    dt = datetime.strptime(dt_str, "%Y %m %d")
+                    if is_valid_date(dt): candidates.append((score, dt))
+                except: pass
             
     return candidates
 
 def process_cti_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     
-    # 1. 日期提取 (v62.9 邏輯)
+    # 1. 日期提取 (v63.0: 復刻 v62.4)
     text_for_dates = ""
     for p in pdf.pages[:3]: text_for_dates += (p.extract_text() or "") + "\n"
     
-    date_candidates = extract_dates_cti_v62_9(text_for_dates)
+    date_candidates = extract_dates_v63_cti(text_for_dates)
     final_dates = []
     if date_candidates:
         valid_only = [d for s, d in date_candidates if s > -500] 
@@ -470,7 +469,7 @@ def process_cti_engine(pdf, filename):
             latest = max(valid_only)
             final_dates.append((100, latest))
 
-    # 2. 表格解析 (維持 v62.8 鹵素邏輯)
+    # 2. 表格解析 (v63.0: 維持 v62.8 鹵素邏輯)
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
@@ -483,11 +482,9 @@ def process_cti_engine(pdf, filename):
                 num_count = 0
                 row_count = 0
                 for r in range(1, len(table)):
-                    # 去除所有可能干擾的符號
                     val = clean_text(table[r][c]).replace("mg/kg", "").replace("~", "").replace("$", "").replace("%", "").strip()
                     if not val: continue
                     row_count += 1
-                    # 包含 CTI 常見的 MDL 數值
                     if val in ["2", "5", "8", "10", "50", "100", "0.01", "0.010", "0.005", "20", "25"]: num_count += 1
                 
                 if row_count > 0 and (num_count / row_count) >= 0.5:
@@ -499,10 +496,8 @@ def process_cti_engine(pdf, filename):
             if mdl_col_idx > 0:
                 result_col_idx = mdl_col_idx - 1
             else:
-                # 備案: 找 Result 標題 或 樣品編號
                 for c in range(cols):
-                    header = str(table[0][c]).lower()
-                    if "result" in header or "结果" in header or re.search(r"00\d", header):
+                    if "result" in str(table[0][c]).lower() or "结果" in str(table[0][c]):
                         result_col_idx = c
                         break
             
@@ -705,9 +700,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v62.9", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v62.9 CTI 日期與鹵素終極定案版)")
-st.info("💡 v62.9：優先掃描原始字串解決 C5191 日期問題，維持 H-8100 鹵素抓取能力。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.0", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.0 CTI 終極混合版)")
+st.info("💡 v63.0：CTI 引擎混合升級！完全復刻 v62.4 日期邏輯 (救回 C5191) + 維持 v62.8 鹵素邏輯 (救回 H-8100)。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -729,7 +724,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v62.9.xlsx",
+            file_name="SGS_CTI_Summary_v63.0.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
