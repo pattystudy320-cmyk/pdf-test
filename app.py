@@ -117,9 +117,7 @@ def parse_value_priority(value_str):
 
 def extract_dates_v62_3(text):
     """
-    v62.3/4 升級版：
-    1. 增加權重計分，排除 Testing Period。
-    2. 增強英文日期格式支援 (Jan. 8, 2025)。
+    v62.4/5: 日期提取核心 (支援權重與多種格式)
     """
     lines = text.split('\n')
     candidates = []
@@ -137,11 +135,13 @@ def extract_dates_v62_3(text):
         line_lower = line.lower()
         score = 1
         
+        # 1. 嚴格扣分 (Testing Period)
         if any(bad in line_lower for bad in poison_kw): 
             score = -1000 
         elif any(good in line_lower for good in bonus_kw): 
             score = 100 
 
+        # 格式匹配
         matches_cn = re.finditer(pat_chinese, line)
         for m in matches_cn:
             try:
@@ -201,13 +201,10 @@ def identify_company(text):
 # =============================================================================
 
 def extract_dates_v60(text):
-    """v60.5 標準日期提取 (用於 SGS/Intertek)"""
     lines = text.split('\n')
     candidates = []
-    
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期"]
     poison_kw = ["approve", "approved", "receive", "received", "receipt", "period", "expiry", "valid"]
-
     pat_ymd = r"(20\d{2})[\.\/-](0?[1-9]|1[0-2])[\.\/-](3[01]|[12][0-9]|0?[1-9])"
     pat_dmy = r"(3[01]|[12][0-9]|0?[1-9])\s+([a-zA-Z]{3,})\s+(20\d{2})"
     pat_mdy = r"([a-zA-Z]{3,})\s+(3[01]|[12][0-9]|0?[1-9])\s+(20\d{2})"
@@ -250,7 +247,6 @@ def identify_columns_v60(table, company):
     item_idx = -1
     result_idx = -1
     mdl_idx = -1
-    
     max_scan_rows = min(3, len(table))
     full_header_text = ""
     for r in range(max_scan_rows):
@@ -308,7 +304,6 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # v60.5 Defenses
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -457,24 +452,23 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v62.5: Relaxed Total Filter + Max Date)
+# 4. CTI 專用引擎 (v62.5: 移除 Total 誤殺 + 保留日期/化學防禦)
 # =============================================================================
 
 def process_cti_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     
-    # 1. 日期提取 (Max Date Strategy)
-    valid_dates = []
+    # 1. 日期提取 (Max Date + Poison)
     text_for_dates = ""
     for p in pdf.pages[:3]: text_for_dates += (p.extract_text() or "") + "\n"
     
     date_candidates = extract_dates_v62_3(text_for_dates)
-    # 取最晚的日期
     final_dates = []
     if date_candidates:
-        valid_only = [d for s, d in date_candidates if s > -500] # 排除 testing period (-1000)
+        # 排除分數過低的 (Testing Period = -1000)
+        valid_only = [d for s, d in date_candidates if s > -500] 
         if valid_only:
-            latest = max(valid_only)
+            latest = max(valid_only) # 選最晚的
             final_dates.append((100, latest))
 
     # 2. 表格解析
@@ -499,7 +493,7 @@ def process_cti_engine(pdf, filename):
                     mdl_col_idx = c
                     break
             
-            # Result 欄位定位
+            # Result 欄位定位 (MDL 左邊)
             result_col_idx = -1
             if mdl_col_idx > 0:
                 result_col_idx = mdl_col_idx - 1
@@ -516,11 +510,9 @@ def process_cti_engine(pdf, filename):
                 
                 item_text = " ".join([str(x) for x in row[:result_col_idx] if x]).lower()
                 
-                # v62.5 修正: 只有當 "total" 和 ("+" 或 "sum" 或 "总和") 同時出現時才跳過
-                # 這樣不會誤殺包含 "total" 雜訊的正常 F/Cl/Br 行
-                if "total" in item_text and ("+" in item_text or "sum" in item_text or "总和" in item_text): 
-                    continue
-
+                # v62.5: 移除 Total 過濾器 (Revert)
+                # 不再檢查 "total" in item_text，讓所有符合關鍵字的行都通過
+                
                 raw_res = str(row[result_col_idx])
                 final_val = None
                 if re.search(r"(?i)(\bN\.?D\.?|\bNot Detected)", raw_res):
@@ -533,10 +525,11 @@ def process_cti_engine(pdf, filename):
                 priority = parse_value_priority(final_val)
                 if priority[0] == 0: continue
 
-                # Defense Mechanism (from v62.3)
+                # Defense Mechanism (保留 v62.4 防禦，防止誤抓)
                 for key, kws in SIMPLE_KEYWORDS.items():
                     if key == "Cd" and any(bad in item_text for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
                     if key == "F" and any(bad in item_text for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
+                    # Br 防禦: 避免把 PBB/PBDE 當成無鹵的 Br
                     if key == "BR" and any(bad in item_text for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
                     if key == "Pb" and any(bad in item_text for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
 
@@ -714,8 +707,8 @@ def find_report_start_page(pdf):
 # =============================================================================
 
 st.set_page_config(page_title="SGS/CTI 報告聚合工具 v62.5", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v62.5 CTI 鹵素修復版)")
-st.info("💡 v62.5：針對 CTI 報告優化 Total 過濾邏輯，找回消失的鹵素數據，並維持化學防禦與日期準確性。")
+st.title("📄 萬用型檢測報告聚合工具 (v62.5 CTI 完美平衡版)")
+st.info("💡 v62.5：CTI 引擎移除 Total 過濾器 (找回鹵素數據)，保留 Max Date 日期策略與化學防禦機制。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
