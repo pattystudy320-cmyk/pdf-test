@@ -7,7 +7,7 @@ import io
 
 # 設定頁面資訊
 st.set_page_config(page_title="SGS Report Parser", layout="wide")
-st.title("📄 SGS Report 檢測結果彙總工具 (DEHP 修正版)")
+st.title("📄 SGS Report 檢測結果彙總工具 (V7 最終防誤抓版)")
 
 # =========================
 # 1. 欄位定義規則
@@ -28,6 +28,23 @@ ITEM_RULES = {
     "BR": r"\bBromine\b",
     "I": r"\bIodine\b",
     "PFOS": r"PFOS"
+}
+
+# 定義 MDL 黑名單：如果抓到的數值剛好等於這些 (float)，就強制視為 N.D.
+# 這是為了防止在沒抓到 N.D. 時，誤把 MDL 當成結果
+MDL_BLOCKLIST = {
+    "Pb": [2.0], 
+    "Cd": [2.0], 
+    "Hg": [2.0], 
+    "CrVI": [8.0, 10.0], # 針對六價鉻常見 MDL
+    "F": [50.0], 
+    "CL": [50.0], 
+    "BR": [50.0], 
+    "I": [50.0],
+    "DEHP": [50.0], 
+    "BBP": [50.0], 
+    "DBP": [50.0], 
+    "DIBP": [50.0]
 }
 
 FINAL_COLUMNS = [
@@ -54,13 +71,14 @@ def extract_text_and_pages(pdf_file):
 
 def extract_result(text, keyword, item_name):
     """
-    V6 最終邏輯:
+    V7 完整邏輯:
     1. DEHP 特例: 擴大讀取 4 行，並刪除名字裡的 "2"。
     2. 除噪: 刪除 Max, MDL, Year, CAS。
     3. N.D. 優先: 只要有 N.D. 就回傳。
     4. 數字計數: 
        - PBBs/PBDEs: 1 個數字 -> Result
        - 其他: 1 個數字 -> MDL (回傳 N.D.) / 2 個數字 -> 取第 1 個
+    5. 黑名單過濾 (New): 如果抓到的數字 = MDL (如 50)，強制回傳 N.D.。
     """
     lines = text.splitlines()
 
@@ -70,10 +88,10 @@ def extract_result(text, keyword, item_name):
             
             # --- DEHP 特例設定 1: 擴大視野 ---
             if item_name == "DEHP":
-                # DEHP 名字長且常換行，多讀幾行確保抓到 N.D.
+                # DEHP 名字長且常換行，多讀幾行確保抓到 N.D. (或誤抓到下一行的 MDL)
                 context = " ".join(lines[i:i+4])
             else:
-                # 一般項目讀 2 行就夠 (避免抓到別欄)
+                # 一般項目讀 2 行就夠
                 context = " ".join(lines[i:i+2])
 
             # ==========================================
@@ -96,7 +114,8 @@ def extract_result(text, keyword, item_name):
             context = re.sub(r"IEC\s*62321[-\d:+A]*", " ", context, flags=re.IGNORECASE)
             context = re.sub(r"\b(19|20)\d{2}\b", " ", context) 
 
-            # 4. 切除 Limit / MDL 標籤與數值
+            # 4. 切除 Limit / MDL 標籤與數值 (Max 1000, MDL 2)
+            # 注意: 這裡只能刪除明確標示 MDL 的數字，如果 MDL 沒標籤，後面邏輯會處理
             context = re.sub(r"(Max|Limit|MDL|LOQ)\s*\d+(\.\d+)?", " ", context, flags=re.IGNORECASE)
 
             # ==========================================
@@ -111,7 +130,7 @@ def extract_result(text, keyword, item_name):
                 return "NEGATIVE"
 
             # ==========================================
-            # 步驟 D: 數字計數法 (核心邏輯)
+            # 步驟 D: 數字抓取與黑名單過濾
             # ==========================================
             
             nums = re.findall(r"\b\d+(?:\.\d+)?\b", context)
@@ -119,29 +138,48 @@ def extract_result(text, keyword, item_name):
             if not nums:
                 return "N.D."
 
+            final_val = None
+
             # --- 依照 Item 決定策略 ---
             
             # 特權項目: PBBs / PBDEs (MDL 為 Dash "-")
             if item_name in ["PBBs", "PBDEs"]:
-                return nums[0] # 直接回傳唯一的數字
+                final_val = nums[0]
             
-            # 一般項目: Pb, Cd, DEHP 等 (MDL 必填)
+            # 一般項目: Pb, Cd, DEHP 等
             else:
                 if len(nums) >= 2:
-                    # 剩下兩個以上數字：[結果] [MDL] -> 取第 1 個
-                    found_val = nums[0]
-                    # 防呆：如果是年份殘渣
+                    # 剩下兩個以上數字 -> 取第 1 個
+                    # (例如 DEHP 抓到 [50, 50]，取第一個 50)
+                    candidate = nums[0]
+                    
+                    # 防呆：如果是年份殘渣，取第二個
                     try:
-                        f_val = float(found_val)
+                        f_val = float(candidate)
                         if 1990 <= f_val <= 2030 and f_val.is_integer():
-                             return nums[1]
+                             candidate = nums[1]
                     except:
                         pass
-                    return found_val
+                    final_val = candidate
                 
                 elif len(nums) == 1:
-                    # 只剩下一個數字，極大機率是 MDL (如 2.0, 50.0) -> 強制判定為 N.D.
+                    # 只剩下一個數字，極大機率是 MDL -> 強制 N.D.
                     return "N.D."
+
+            # ==========================================
+            # 步驟 E: 最後防線 - 黑名單過濾 (Blocklist)
+            # ==========================================
+            if final_val:
+                try:
+                    val_float = float(final_val)
+                    # 檢查是否在黑名單中 (例如 DEHP=50.0, Pb=2.0)
+                    if item_name in MDL_BLOCKLIST:
+                        if val_float in MDL_BLOCKLIST[item_name]:
+                            return "N.D." # 命中黑名單，判定為誤抓 MDL
+                    
+                    return final_val
+                except:
+                    pass
 
     return ""
 
@@ -209,7 +247,6 @@ if uploaded_files:
         full_text, pages_text = extract_text_and_pages(file)
         record = {}
 
-        # 傳入 item name 以便啟用 DEHP 特例邏輯
         for item, keyword in ITEM_RULES.items():
             record[item] = extract_result(full_text, keyword, item)
 
