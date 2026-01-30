@@ -115,6 +115,78 @@ def parse_value_priority(value_str):
         except: pass
     return (0, 0, val)
 
+def extract_dates_v62_7(text):
+    """
+    v62.7: CTI 日期提取 (增強空格與點的容忍度)
+    """
+    lines = text.split('\n')
+    candidates = []
+    
+    bonus_kw = ["report date", "issue date", "date:", "dated", "日期", "签发日期"]
+    poison_kw = ["approve", "approved", "receive", "received", "receipt", "period", "expiry", "valid", "testing", "检测周期", "收样", "test period"]
+
+    pat_ymd = r"(20\d{2})[\.\/-](0?[1-9]|1[0-2])[\.\/-](3[01]|[12][0-9]|0?[1-9])"
+    # v62.7: 允許點後面有多個空格 ([a-zA-Z]{3,})\.?\s+
+    pat_mdy_en = r"([a-zA-Z]{3,})\.?\s+(3[01]|[12][0-9]|0?[1-9]),?\s+(20\d{2})"
+    pat_dmy = r"(3[01]|[12][0-9]|0?[1-9])\s+([a-zA-Z]{3,})\.?\s+(20\d{2})"
+    pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
+    pat_dot = r"(20\d{2})\.(0?[1-9]|1[0-2])\.(3[01]|[12][0-9]|0?[1-9])"
+
+    for line in lines:
+        line_lower = line.lower()
+        score = 1
+        
+        if any(bad in line_lower for bad in poison_kw): 
+            score = -1000 
+        elif any(good in line_lower for good in bonus_kw): 
+            score = 100 
+
+        matches_cn = re.finditer(pat_chinese, line)
+        for m in matches_cn:
+            try:
+                dt = datetime.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d")
+                if is_valid_date(dt): candidates.append((score, dt))
+            except: pass
+
+        matches_dot = re.finditer(pat_dot, line)
+        for m in matches_dot:
+            try:
+                dt = datetime.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d")
+                if is_valid_date(dt): candidates.append((score, dt))
+            except: pass
+
+        matches_mdy = re.finditer(pat_mdy_en, line)
+        for m in matches_mdy:
+            try:
+                mon_str = m.group(1).replace(".", "")
+                dt_str = f"{mon_str} {m.group(2)} {m.group(3)}"
+                for fmt in ["%b %d %Y", "%B %d %Y"]:
+                    try:
+                        dt = datetime.strptime(dt_str, fmt)
+                        if is_valid_date(dt): candidates.append((score, dt))
+                    except: pass
+            except: pass
+
+        clean_line = line.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
+        clean_line = clean_line.replace("年", " ").replace("月", " ").replace("日", " ")
+        clean_line = " ".join(clean_line.split())
+        
+        for pat in [pat_ymd, pat_dmy]:
+            matches = re.finditer(pat, clean_line)
+            for m in matches:
+                try:
+                    dt_str = " ".join(m.groups())
+                    for fmt in ["%Y %m %d", "%d %b %Y", "%d %B %Y"]:
+                        try:
+                            dt = datetime.strptime(dt_str, fmt)
+                            if is_valid_date(dt): 
+                                candidates.append((score, dt))
+                                break
+                        except: pass
+                except: pass
+            
+    return candidates
+
 def identify_company(text):
     txt = text.lower()
     if "sgs" in txt: return "SGS"
@@ -131,10 +203,8 @@ def extract_dates_v60(text):
     """v60.5 標準日期提取"""
     lines = text.split('\n')
     candidates = []
-    
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期"]
     poison_kw = ["approve", "approved", "receive", "received", "receipt", "period", "expiry", "valid"]
-
     pat_ymd = r"(20\d{2})[\.\/-](0?[1-9]|1[0-2])[\.\/-](3[01]|[12][0-9]|0?[1-9])"
     pat_dmy = r"(3[01]|[12][0-9]|0?[1-9])\s+([a-zA-Z]{3,})\s+(20\d{2})"
     pat_mdy = r"([a-zA-Z]{3,})\s+(3[01]|[12][0-9]|0?[1-9])\s+(20\d{2})"
@@ -234,7 +304,6 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # v60.5 Defenses
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -383,85 +452,17 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v62.6: Max Date Fix + MDL Unit Fix)
+# 4. CTI 專用引擎 (v62.7: MDL Unit Stripping + Date Fix)
 # =============================================================================
-
-def extract_dates_cti_v62_4(text):
-    """
-    v62.4 的日期提取邏輯 (已驗證對 CTI 有效)
-    """
-    lines = text.split('\n')
-    candidates = []
-    
-    bonus_kw = ["report date", "issue date", "date:", "dated", "日期", "签发日期"]
-    poison_kw = ["approve", "approved", "receive", "received", "receipt", "period", "expiry", "valid", "testing", "检测周期", "收样", "test period"]
-
-    pat_ymd = r"(20\d{2})[\.\/-](0?[1-9]|1[0-2])[\.\/-](3[01]|[12][0-9]|0?[1-9])"
-    # v62.4: 增強英文匹配 (Jan. 8, 2025)
-    pat_mdy_en = r"([a-zA-Z]{3,})\.?\s*(3[01]|[12][0-9]|0?[1-9]),?\s*(20\d{2})"
-    pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
-    pat_dot = r"(20\d{2})\.(0?[1-9]|1[0-2])\.(3[01]|[12][0-9]|0?[1-9])"
-
-    for line in lines:
-        line_lower = line.lower()
-        score = 1
-        
-        if any(bad in line_lower for bad in poison_kw): 
-            score = -1000 
-        elif any(good in line_lower for good in bonus_kw): 
-            score = 100 
-
-        matches_cn = re.finditer(pat_chinese, line)
-        for m in matches_cn:
-            try:
-                dt = datetime.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d")
-                if is_valid_date(dt): candidates.append((score, dt))
-            except: pass
-
-        matches_dot = re.finditer(pat_dot, line)
-        for m in matches_dot:
-            try:
-                dt = datetime.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d")
-                if is_valid_date(dt): candidates.append((score, dt))
-            except: pass
-
-        # 英文 MDY
-        matches_mdy = re.finditer(pat_mdy_en, line)
-        for m in matches_mdy:
-            try:
-                # 這裡不 replace 點，因為 regex 已經處理了
-                mon_str = m.group(1).replace(".", "")
-                dt_str = f"{mon_str} {m.group(2)} {m.group(3)}"
-                for fmt in ["%b %d %Y", "%B %d %Y"]:
-                    try:
-                        dt = datetime.strptime(dt_str, fmt)
-                        if is_valid_date(dt): candidates.append((score, dt))
-                    except: pass
-            except: pass
-
-        # YMD 清洗匹配
-        clean_line = line.replace(".", " ").replace(",", " ").replace("-", " ").replace("/", " ")
-        clean_line = clean_line.replace("年", " ").replace("月", " ").replace("日", " ")
-        clean_line = " ".join(clean_line.split())
-        
-        matches = re.finditer(pat_ymd, clean_line)
-        for m in matches:
-            try:
-                dt_str = " ".join(m.groups())
-                dt = datetime.strptime(dt_str, "%Y %m %d")
-                if is_valid_date(dt): candidates.append((score, dt))
-            except: pass
-            
-    return candidates
 
 def process_cti_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     
-    # 1. 日期提取 (使用 v62.4 邏輯)
+    # 1. 日期提取
     text_for_dates = ""
     for p in pdf.pages[:3]: text_for_dates += (p.extract_text() or "") + "\n"
     
-    date_candidates = extract_dates_cti_v62_4(text_for_dates)
+    date_candidates = extract_dates_v62_7(text_for_dates)
     final_dates = []
     if date_candidates:
         valid_only = [d for s, d in date_candidates if s > -500] 
@@ -475,18 +476,19 @@ def process_cti_engine(pdf, filename):
         for table in tables:
             if not table or len(table) < 2: continue
             
-            # 定位錨點: 找 MDL 欄位 (v62.6 Fix: Strip units)
+            # 定位錨點: 找 MDL 欄位 (v62.7: 強力去單位)
             mdl_col_idx = -1
             cols = len(table[0])
             for c in range(cols):
                 num_count = 0
                 row_count = 0
                 for r in range(1, len(table)):
-                    # 強力去單位，解決 $10~mg/kg$
+                    # 去除所有可能干擾的符號
                     val = clean_text(table[r][c]).replace("mg/kg", "").replace("~", "").replace("$", "").replace("%", "").strip()
                     if not val: continue
                     row_count += 1
-                    if val in ["2", "5", "8", "10", "50", "100", "0.01", "0.010"]: num_count += 1
+                    # 包含 CTI 常見的 MDL 數值
+                    if val in ["2", "5", "8", "10", "50", "100", "0.01", "0.010", "0.005", "20", "25"]: num_count += 1
                 
                 if row_count > 0 and (num_count / row_count) >= 0.5:
                     mdl_col_idx = c
@@ -497,8 +499,10 @@ def process_cti_engine(pdf, filename):
             if mdl_col_idx > 0:
                 result_col_idx = mdl_col_idx - 1
             else:
+                # 備案: 找 Result 標題 或 樣品編號 (001, 002...)
                 for c in range(cols):
-                    if "result" in str(table[0][c]).lower() or "结果" in str(table[0][c]):
+                    header = str(table[0][c]).lower()
+                    if "result" in header or "结果" in header or re.search(r"00\d", header):
                         result_col_idx = c
                         break
             
@@ -508,8 +512,6 @@ def process_cti_engine(pdf, filename):
                 if len(row) <= result_col_idx: continue
                 
                 item_text = " ".join([str(x) for x in row[:result_col_idx] if x]).lower()
-                
-                # v62.6: Total 移除 (完全不過濾)
                 
                 raw_res = str(row[result_col_idx])
                 final_val = None
@@ -701,9 +703,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v62.6", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v62.6 CTI 終極修復版)")
-st.info("💡 v62.6：修復 CTI 鹵素 MDL 單位識別問題，回滾 v62.4 日期邏輯以支援特殊英文格式。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v62.7", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v62.7 CTI 終極融合版)")
+st.info("💡 v62.7：修復 MDL 單位識別以找回 CTI 鹵素，並強化 CTI 日期 Regex 兼容性。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -725,7 +727,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v62.6.xlsx",
+            file_name="SGS_CTI_Summary_v62.7.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
