@@ -140,7 +140,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 3. 引擎 A: 標準引擎 (Standard Engine) - v60.5
+# 3. 引擎 A: 標準引擎 (Standard Engine) - v60.5 + v63.14 Fix
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -250,7 +250,9 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
+            # v63.14 Fix: 新增 "indeno" 到 Cd 的防禦列表
+            if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue 
+            
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
             if key == "Pb" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
@@ -355,7 +357,9 @@ def process_standard_engine(pdf, filename, company):
                 if priority[0] == 0: continue
 
                 for target_key, keywords in SIMPLE_KEYWORDS.items():
-                    if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): continue
+                    # v63.14 Fix: Table-based parsing defense
+                    if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
+                    
                     if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
                     if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
                     if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
@@ -704,9 +708,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.13", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.13 CTI 全域串流分析版)")
-st.info("💡 v63.13：CTI 日期引擎啟用「全域串流分析 (Global Stream Analysis)」，徹底打破 PDF 行與排版的限制，並結合毒藥回溯與日期最大化邏輯，確保抓取到最晚的有效日期。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.14", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.14 SGS 誤判修復版)")
+st.info("💡 v63.14：修復 SGS 引擎誤判問題，將 Indeno(1,2,3-cd)pyrene 加入防禦列表，同時保留 CTI 引擎的全域串流日期分析功能。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -728,7 +732,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.13.xlsx",
+            file_name="SGS_CTI_Summary_v63.14.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
