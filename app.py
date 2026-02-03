@@ -357,9 +357,7 @@ def process_standard_engine(pdf, filename, company):
                 if priority[0] == 0: continue
 
                 for target_key, keywords in SIMPLE_KEYWORDS.items():
-                    # v63.14 Fix: Table-based parsing defense
                     if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
-                    
                     if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
                     if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
                     if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
@@ -465,31 +463,32 @@ def extract_dates_v63_13_global(text):
 def process_cti_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     
-    # 1. 讀取前 3 頁並串接
+    # 1. 日期抓取 (v63.13 邏輯 - 保持不變)
     text_for_dates = ""
     for p in pdf.pages[:3]: 
-        text_for_dates += (p.extract_text() or "") + " " # 加空格防止黏字
+        text_for_dates += (p.extract_text() or "") + " " 
     
-    # 2. 全域串流提取
     date_candidates = extract_dates_v63_13_global(text_for_dates)
     final_dates = []
     
     if date_candidates:
-        # Max Date Priority
         valid_entries = [entry for entry in date_candidates if entry[0] > 0]
         if valid_entries:
-            # 排序：日期越晚越大
             best_entry = sorted(valid_entries, key=lambda x: (x[1], x[0]), reverse=True)[0]
             final_dates.append(best_entry)
 
-    # 3. 表格解析 (維持 v62.8 鹵素邏輯)
+    # 2. 表格解析 (v63.15 更新: 多欄位聚合)
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
             if not table or len(table) < 2: continue
             
+            # 定位錨點
+            item_col_idx = -1
             mdl_col_idx = -1
             cols = len(table[0])
+            
+            # A. 找 MDL (右邊界)
             for c in range(cols):
                 num_count = 0
                 row_count = 0
@@ -498,39 +497,48 @@ def process_cti_engine(pdf, filename):
                     if not val: continue
                     row_count += 1
                     if val in ["2", "5", "8", "10", "50", "100", "0.01", "0.010", "0.005", "20", "25"]: num_count += 1
-                
                 if row_count > 0 and (num_count / row_count) >= 0.5:
                     mdl_col_idx = c
                     break
             
-            result_col_idx = -1
-            if mdl_col_idx > 0:
-                result_col_idx = mdl_col_idx - 1
-            else:
-                for c in range(cols):
-                    if "result" in str(table[0][c]).lower() or "结果" in str(table[0][c]):
-                        result_col_idx = c
-                        break
+            # B. 找 Test Item (左邊界)
+            for c in range(cols):
+                header = str(table[0][c]).lower()
+                if "item" in header or "項目" in header or "项目" in header:
+                    item_col_idx = c
+                    break
+            if item_col_idx == -1: item_col_idx = 0 # 預設第0欄
             
-            if result_col_idx == -1: continue
-
+            if mdl_col_idx == -1: continue # 找不到 MDL，放棄此表
+            
+            # C. 確定結果欄位範圍 (Item右邊 ~ MDL左邊)
+            result_col_indices = [c for c in range(item_col_idx + 1, mdl_col_idx)]
+            if not result_col_indices:
+                # 如果中間沒有欄位 (例如 | Item | MDL |)，可能格式不標準，嘗試 MDL 前一欄
+                if mdl_col_idx > 0: result_col_indices = [mdl_col_idx - 1]
+            
+            # D. 遍歷每一列，聚合數據
             for row in table:
-                if len(row) <= result_col_idx: continue
+                if len(row) <= mdl_col_idx: continue
                 
-                item_text = " ".join([str(x) for x in row[:result_col_idx] if x]).lower()
+                item_text = clean_text(row[item_col_idx]).lower()
                 
-                raw_res = str(row[result_col_idx])
-                final_val = None
-                if re.search(r"(?i)(\bN\.?D\.?|\bNot Detected)", raw_res):
-                    final_val = "N.D."
-                else:
-                    nums = re.findall(r"\d+(?:\.\d+)?", raw_res)
-                    if nums: final_val = nums[0] 
+                # 收集該列所有結果欄的數據
+                row_candidates = []
+                for c_idx in result_col_indices:
+                    if c_idx < len(row):
+                        val_str = str(row[c_idx])
+                        prio = parse_value_priority(val_str)
+                        if prio[0] > 0: # 0=無效, 1=ND, 2=Neg, 3=Num
+                            row_candidates.append(prio)
                 
-                if not final_val: continue
-                priority = parse_value_priority(final_val)
-                if priority[0] == 0: continue
-
+                if not row_candidates: continue
+                
+                # E. 聚合邏輯: 取優先級最高、數值最大的
+                # 排序: (Priority Desc, Value Desc) -> (3, 97) > (3, 50) > (2, 0) > (1, 0)
+                best_prio = sorted(row_candidates, key=lambda x: (x[0], x[1]), reverse=True)[0]
+                
+                # F. 關鍵字匹配與存儲
                 for key, kws in SIMPLE_KEYWORDS.items():
                     if key == "Cd" and any(bad in item_text for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
                     if key == "F" and any(bad in item_text for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
@@ -538,11 +546,12 @@ def process_cti_engine(pdf, filename):
                     if key == "Pb" and any(bad in item_text for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
 
                     if any(kw.lower() in item_text for kw in kws):
-                        data_pool[key].append({"priority": priority, "filename": filename})
+                        data_pool[key].append({"priority": best_prio, "filename": filename})
                         break
+                
                 for key, kws in GROUP_KEYWORDS.items():
                     if any(kw.lower() in item_text for kw in kws):
-                        data_pool[key].append({"priority": priority, "filename": filename})
+                        data_pool[key].append({"priority": best_prio, "filename": filename})
                         break
 
     return data_pool, final_dates
@@ -708,9 +717,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.14", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.14 SGS 誤判修復版)")
-st.info("💡 v63.14：修復 SGS 引擎誤判問題，將 Indeno(1,2,3-cd)pyrene 加入防禦列表，同時保留 CTI 引擎的全域串流日期分析功能。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.15", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.15 CTI 多樣品聚合版)")
+st.info("💡 v63.15：CTI 引擎新增「多樣品聚合 (Multi-Sample Aggregation)」功能，能自動掃描多個結果欄位並取最大值，同時確保日期與 SGS 防禦機制不受影響。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -732,7 +741,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.14.xlsx",
+            file_name="SGS_CTI_Summary_v63.15.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
