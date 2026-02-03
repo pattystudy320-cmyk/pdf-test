@@ -356,26 +356,50 @@ def process_standard_engine(pdf, filename, company):
                             file_group_data[group_key].append(priority)
                             break
 
+    # Text Rescue (SGS Only)
+    if company == "SGS":
+        missing_targets = []
+        pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
+        halogen_data = []
+        for h in ["F", "CL", "BR", "I"]:
+            halogen_data.extend([d for d in data_pool[h] if d['filename'] == filename])
+        pfos_data = [d for d in data_pool["PFOS"] if d['filename'] == filename]
+        
+        trigger_rescue = False
+        if not pb_data: trigger_rescue = True
+        if ("halogen" in full_text_content.lower() or "卤素" in full_text_content) and not halogen_data:
+            trigger_rescue = True
+        if "pfos" in full_text_content.lower() and not pfos_data:
+            trigger_rescue = True
+
+        if trigger_rescue:
+             parse_text_lines_v60(full_text_content, data_pool, file_group_data, filename, company, targets=None)
+
+    for group_key, values in file_group_data.items():
+        if values:
+            best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
+            data_pool[group_key].append({"priority": best_in_file, "filename": filename})
+
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v63.3: 回歸 v62.4 暴力清洗邏輯)
+# 4. CTI 專用引擎 (v63.4: 特赦 Testing Period)
 # =============================================================================
 
-def extract_dates_v63_3_cti(text):
+def extract_dates_v63_4_cti(text):
     """
-    v63.3: 暴力清洗法 (先將 ., 轉為空格，再匹配) - 復刻 v62.4
+    v63.4: 暴力清洗 + 特赦 Testing Period
     """
     lines = text.split('\n')
     candidates = []
     
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期", "签发日期"]
-    poison_kw = ["approve", "approved", "receive", "received", "receipt", "period", "expiry", "valid", "testing", "检测周期", "收样", "test period"]
+    # v63.4: Testing Period 不再是死刑 (-1000)，而是備胎 (10)
+    poison_kw = ["approve", "approved", "receive", "received", "receipt", "expiry", "valid", "收样"]
+    backup_kw = ["testing period", "test period", "检测周期", "测试周期"]
 
-    # v62.4 的勝利方程式: 清洗後只找空格分隔的 (英文月 + 日 + 年)
+    # 暴力清洗匹配模式 (空格分隔)
     pat_mdy_clean = r"([a-zA-Z]{3,})\s+(3[01]|[12][0-9]|0?[1-9])\s+(20\d{2})"
-    
-    pat_ymd = r"(20\d{2})[\.\/-](0?[1-9]|1[0-2])[\.\/-](3[01]|[12][0-9]|0?[1-9])"
     pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
     pat_dot = r"(20\d{2})\.(0?[1-9]|1[0-2])\.(3[01]|[12][0-9]|0?[1-9])"
 
@@ -383,12 +407,15 @@ def extract_dates_v63_3_cti(text):
         line_lower = line.lower()
         score = 1
         
+        # 評分邏輯 (v63.4 關鍵修正)
         if any(bad in line_lower for bad in poison_kw): 
             score = -1000 
         elif any(good in line_lower for good in bonus_kw): 
             score = 100 
-
-        # 1. 中文與點號格式 (標準匹配)
+        elif any(back in line_lower for back in backup_kw):
+            score = 10 # 備胎分數，比普通日期(1)高，但比Issue Date(100)低
+        
+        # 1. 中文與點號格式
         matches_cn = re.finditer(pat_chinese, line)
         for m in matches_cn:
             try:
@@ -403,11 +430,9 @@ def extract_dates_v63_3_cti(text):
                 if is_valid_date(dt): candidates.append((score, dt))
             except: pass
 
-        # 2. 暴力清洗 (Brute Force Cleaning) -> 針對 C5191 英文日期
-        # 將所有 . 和 , 都變成空格，不管它們在哪
+        # 2. 暴力清洗 (Brute Force Cleaning)
         clean_line = line.replace(".", " ").replace(",", " ") 
         
-        # 英文 MDY
         matches_mdy = re.finditer(pat_mdy_clean, clean_line)
         for m in matches_mdy:
             try:
@@ -419,11 +444,9 @@ def extract_dates_v63_3_cti(text):
                     except: pass
             except: pass
 
-        # YMD
-        # 對 YMD 做進一步清洗 (去除 - /)
+        # YMD 補漏
         clean_line_ymd = clean_line.replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
         clean_line_ymd = " ".join(clean_line_ymd.split())
-        
         matches = re.finditer(r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(3[01]|[12][0-9]|0?[1-9])", clean_line_ymd)
         for m in matches:
             try:
@@ -437,16 +460,17 @@ def extract_dates_v63_3_cti(text):
 def process_cti_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     
-    # 1. 日期提取 (v63.3 邏輯)
+    # 1. 日期提取 (v63.4)
     text_for_dates = ""
     for p in pdf.pages[:3]: text_for_dates += (p.extract_text() or "") + "\n"
     
-    date_candidates = extract_dates_v63_3_cti(text_for_dates)
+    date_candidates = extract_dates_v63_4_cti(text_for_dates)
     final_dates = []
+    # v63.4: 允許正分候選 (因為 Testing Period 現在是 10 分)
     if date_candidates:
-        valid_only = [d for s, d in date_candidates if s > -500] 
+        valid_only = [d for s, d in date_candidates if s > 0] 
         if valid_only:
-            latest = max(valid_only)
+            latest = max(valid_only) # 即使是 Testing Period，也會選結束日期(較晚的)
             final_dates.append((100, latest))
 
     # 2. 表格解析 (維持 v62.8 鹵素邏輯 - 強力去單位 + 不過濾 Total)
@@ -455,25 +479,21 @@ def process_cti_engine(pdf, filename):
         for table in tables:
             if not table or len(table) < 2: continue
             
-            # 定位錨點: 找 MDL 欄位 (強力去單位)
             mdl_col_idx = -1
             cols = len(table[0])
             for c in range(cols):
                 num_count = 0
                 row_count = 0
                 for r in range(1, len(table)):
-                    # 去除所有可能干擾的符號
                     val = clean_text(table[r][c]).replace("mg/kg", "").replace("~", "").replace("$", "").replace("%", "").strip()
                     if not val: continue
                     row_count += 1
-                    # 包含 CTI 常見的 MDL 數值
                     if val in ["2", "5", "8", "10", "50", "100", "0.01", "0.010", "0.005", "20", "25"]: num_count += 1
                 
                 if row_count > 0 and (num_count / row_count) >= 0.5:
                     mdl_col_idx = c
                     break
             
-            # Result 欄位定位
             result_col_idx = -1
             if mdl_col_idx > 0:
                 result_col_idx = mdl_col_idx - 1
@@ -490,8 +510,6 @@ def process_cti_engine(pdf, filename):
                 
                 item_text = " ".join([str(x) for x in row[:result_col_idx] if x]).lower()
                 
-                # 不過濾 Total
-                
                 raw_res = str(row[result_col_idx])
                 final_val = None
                 if re.search(r"(?i)(\bN\.?D\.?|\bNot Detected)", raw_res):
@@ -504,7 +522,6 @@ def process_cti_engine(pdf, filename):
                 priority = parse_value_priority(final_val)
                 if priority[0] == 0: continue
 
-                # Defense Mechanism
                 for key, kws in SIMPLE_KEYWORDS.items():
                     if key == "Cd" and any(bad in item_text for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
                     if key == "F" and any(bad in item_text for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
@@ -682,9 +699,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.3", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.3 CTI 暴力清洗回歸版)")
-st.info("💡 v63.3：CTI 日期引擎回歸 v62.4 暴力清洗邏輯 (解決 Jan. 8 格式)，鹵素維持 v62.8 設定。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.4", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.4 CTI 日期特赦版)")
+st.info("💡 v63.4：CTI 日期特赦策略 (允許備用 Testing Period)，完美解決 C5191 日期關鍵字分離問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -706,7 +723,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.3.xlsx",
+            file_name="SGS_CTI_Summary_v63.4.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
