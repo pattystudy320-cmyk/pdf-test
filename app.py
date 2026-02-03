@@ -398,95 +398,87 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v63.12: Token Parsing + Max Date Priority)
+# 4. CTI 專用引擎 (v63.13: Global Token Stream)
 # =============================================================================
 
-def extract_dates_v63_12_cti(text):
+def extract_dates_v63_13_global(text):
     """
-    v63.12: Token Parsing (單詞接龍) - 徹底解決 Regex 與 Spacing 問題
+    v63.13: 全域串流分析 (Global Token Stream)
+    將前3頁文字合併為一個大字串，進行分詞掃描，徹底解決跨行問題。
     """
-    lines = text.split('\n')
     candidates = []
     
-    bonus_kw = ["report date", "issue date", "date:", "dated", "日期", "签发日期"]
-    poison_kw = ["approve", "approved", "receive", "received", "receipt", "expiry", "valid", "收样"]
-    backup_kw = ["testing period", "test period", "检测周期", "测试周期"]
-
-    # 中文 YMD 格式 regex (因為中文通常沒有空格問題)
-    pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
-    pat_dot = r"(20\d{2})\.(0?[1-9]|1[0-2])\.(3[01]|[12][0-9]|0?[1-9])"
-
-    for i, line in enumerate(lines):
-        line_lower = line.lower()
+    # 毒藥關鍵字
+    poison_kw = ["received", "receive", "expiry", "valid", "process"]
+    # 備胎關鍵字 (Testing Period)
+    backup_kw = ["testing", "period", "test"]
+    
+    # 1. 強力清洗與分詞
+    # 替換所有標點符號為空格，轉小寫
+    clean_text = re.sub(r'[^a-z0-9]', ' ', text.lower())
+    tokens = clean_text.split()
+    
+    # 2. 滑動視窗掃描 (Sliding Window)
+    for i in range(len(tokens) - 2):
+        t1, t2, t3 = tokens[i], tokens[i+1], tokens[i+2]
+        dt = None
         
-        # 1. 優先嘗試中文/點號格式
-        for pat in [pat_chinese, pat_dot]:
-            matches = re.finditer(pat, line)
-            for m in matches:
-                try:
-                    dt = datetime.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d")
-                    if is_valid_date(dt): 
-                        score = 1
-                        if any(bad in line_lower for bad in poison_kw): score = -1000
-                        elif any(good in line_lower for good in bonus_kw): score = 100
-                        elif any(back in line_lower for back in backup_kw): score = 10
-                        candidates.append((score, dt))
-                except: pass
-
-        # 2. Token Parsing (英文 MDY / DMY) - 核心修正
-        # 將所有非英數字元替換為空格，然後切分
-        clean_line = re.sub(r'[^a-z0-9]', ' ', line_lower)
-        tokens = clean_line.split()
+        try:
+            # 模式 A: MDY (mar 15 2022)
+            if t1 in MONTH_MAP and t2.isdigit() and t3.isdigit() and len(t3) == 4:
+                m, d, y = MONTH_MAP[t1], int(t2), int(t3)
+                dt = datetime(y, m, d)
+            
+            # 模式 B: DMY (15 mar 2022)
+            elif t1.isdigit() and t2 in MONTH_MAP and t3.isdigit() and len(t3) == 4:
+                d, m, y = int(t1), MONTH_MAP[t2], int(t3)
+                dt = datetime(y, m, d)
+                
+            # 模式 C: YMD (2022 03 15)
+            elif t1.isdigit() and len(t1) == 4 and t2.isdigit() and t3.isdigit():
+                y, m, d = int(t1), int(t2), int(t3)
+                dt = datetime(y, m, d)
+                
+            if dt and is_valid_date(dt):
+                # 3. 毒藥回溯 (Poison Backtrack)
+                # 檢查前 10 個 token 是否有毒藥
+                start_lookback = max(0, i - 10)
+                context_window = tokens[start_lookback : i]
+                
+                score = 100 # 預設滿分 (假設是孤兒/簽名檔日期)
+                
+                if any(p in context_window for p in poison_kw):
+                    score = -1000 # 毒藥 (Received Date)
+                elif any(b in context_window for b in backup_kw):
+                    score = 10 # 備胎 (Testing Period)
+                
+                candidates.append((score, dt))
+                
+        except: pass
         
-        # 掃描 tokens
-        for idx in range(len(tokens) - 2):
-            try:
-                t1, t2, t3 = tokens[idx], tokens[idx+1], tokens[idx+2]
-                dt = None
-                
-                # 模式 A: MDY (Mar 15 2022)
-                if t1 in MONTH_MAP and t2.isdigit() and t3.isdigit() and len(t3) == 4:
-                    m, d, y = MONTH_MAP[t1], int(t2), int(t3)
-                    dt = datetime(y, m, d)
-                
-                # 模式 B: DMY (15 Mar 2022)
-                elif t1.isdigit() and t2 in MONTH_MAP and t3.isdigit() and len(t3) == 4:
-                    d, m, y = int(t1), MONTH_MAP[t2], int(t3)
-                    dt = datetime(y, m, d)
-                
-                # 模式 C: YMD (2022 03 15) - 補漏
-                elif t1.isdigit() and len(t1) == 4 and t2.isdigit() and t3.isdigit():
-                    y, m, d = int(t1), int(t2), int(t3)
-                    dt = datetime(y, m, d)
-
-                if dt and is_valid_date(dt):
-                    score = 1
-                    if any(bad in line_lower for bad in poison_kw): score = -1000
-                    elif any(good in line_lower for good in bonus_kw): score = 100
-                    elif any(back in line_lower for back in backup_kw): score = 10
-                    candidates.append((score, dt))
-            except: pass
-
     return candidates
 
 def process_cti_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     
+    # 1. 讀取前 3 頁並串接
     text_for_dates = ""
-    for p in pdf.pages[:3]: text_for_dates += (p.extract_text() or "") + "\n"
+    for p in pdf.pages[:3]: 
+        text_for_dates += (p.extract_text() or "") + " " # 加空格防止黏字
     
-    # 使用 v63.12 Token Parsing 版
-    date_candidates = extract_dates_v63_12_cti(text_for_dates)
+    # 2. 全域串流提取
+    date_candidates = extract_dates_v63_13_global(text_for_dates)
     final_dates = []
     
     if date_candidates:
         # Max Date Priority
         valid_entries = [entry for entry in date_candidates if entry[0] > 0]
         if valid_entries:
+            # 排序：日期越晚越大
             best_entry = sorted(valid_entries, key=lambda x: (x[1], x[0]), reverse=True)[0]
             final_dates.append(best_entry)
 
-    # 2. 表格解析 (維持 v62.8 鹵素邏輯)
+    # 3. 表格解析 (維持 v62.8 鹵素邏輯)
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
@@ -712,9 +704,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.12", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.12 CTI Token Parsing 版)")
-st.info("💡 v63.12：CTI 日期引擎啟用單詞接龍 (Token Parsing)，徹底擺脫 Regex 僵化與標點符號干擾，精準鎖定任意格式日期。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.13", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.13 CTI 全域串流分析版)")
+st.info("💡 v63.13：CTI 日期引擎啟用「全域串流分析 (Global Stream Analysis)」，徹底打破 PDF 行與排版的限制，並結合毒藥回溯與日期最大化邏輯，確保抓取到最晚的有效日期。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -736,7 +728,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.12.xlsx",
+            file_name="SGS_CTI_Summary_v63.13.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
