@@ -140,7 +140,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 3. 引擎 A: 標準引擎 (Standard Engine) - v60.5 + v63.14 Fix
+# 3. 引擎 A: 標準引擎 (Standard Engine) - v63.16 更新版
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -208,22 +208,27 @@ def identify_columns_v60(table, company):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt:
+            # v63.16 Fix: 加入 "parameter" 識別
+            if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt or "parameter" in txt:
                 if item_idx == -1: item_idx = c_idx
             if "mdl" in txt or "loq" in txt:
                 if mdl_idx == -1: mdl_idx = c_idx
             
             if company == "SGS":
+                 # v63.16 Fix: 放寬結果欄 Regex，允許 A.C006 等格式
                  if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt) or 
-                    re.search(r"^[a-z]?\s*-?\s*\d+$", txt) or "no." in txt):
+                    re.search(r"^[a-z]?\s*\.?\s*[a-z]?\d+", txt) or "no." in txt):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
                         if result_idx == -1: result_idx = c_idx
             else:
                 if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
                     if result_idx == -1: result_idx = c_idx
     
+    # v63.16 Fix: 強效備援，若找不到 Result 但有 MDL，取 MDL 左邊那欄
     if result_idx == -1 and company == "SGS":
-        if mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
+        if mdl_idx != -1 and mdl_idx > 0:
+            result_idx = mdl_idx - 1
+        elif mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
             result_idx = mdl_idx + 1
 
     is_reference_table = False
@@ -324,54 +329,83 @@ def process_standard_engine(pdf, filename, company):
             if is_skip: continue
             
             for row in table:
-                clean_row = [clean_text(cell) for cell in row]
-                row_txt = "".join(clean_row).lower()
-                if "test item" in row_txt or "result" in row_txt: continue
-                if not any(clean_row): continue
+                # v63.16 Fix: 動態拆行邏輯 (處理 Fluorine/Chlorine 同格問題)
+                raw_item_cell = str(row[item_idx]) if item_idx < len(row) and row[item_idx] else ""
+                raw_result_cell = str(row[result_idx]) if result_idx != -1 and result_idx < len(row) and row[result_idx] else ""
                 
-                target_item_col = item_idx if item_idx != -1 else 0
-                if target_item_col >= len(clean_row): continue
-                item_name = clean_row[target_item_col]
-                item_name_lower = item_name.lower()
+                rows_to_process = []
                 
-                if "pvc" in item_name_lower: continue
+                if "\n" in raw_item_cell:
+                    # 嘗試拆解
+                    split_items = raw_item_cell.split('\n')
+                    split_results = raw_result_cell.split('\n')
+                    
+                    # 如果結果欄也有相同數量的換行，或者是單一結果對應多項目(較少見)，進行拆解
+                    # 這裡主要針對 Row Merging 情況: ItemA\nItemB -> ResultA\nResultB
+                    if len(split_items) > 1 and len(split_items) == len(split_results):
+                        for si, sr in zip(split_items, split_results):
+                            # 建立虛擬 row
+                            virtual_row = list(row)
+                            virtual_row[item_idx] = si
+                            if result_idx != -1: virtual_row[result_idx] = sr
+                            rows_to_process.append(virtual_row)
+                    else:
+                        rows_to_process.append(row)
+                else:
+                    rows_to_process.append(row)
 
-                result = ""
-                if result_idx != -1 and result_idx < len(clean_row):
-                    result = clean_row[result_idx]
-                
-                temp_priority = parse_value_priority(result)
-                if temp_priority[0] == 0:
-                    for cell in reversed(clean_row):
-                        c_lower = cell.lower()
-                        if not cell: continue
-                        if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
-                            result = cell
-                            break
-                        if re.search(r"^\d+(\.\d+)?", cell):
-                            if is_suspicious_limit_value(cell): continue
-                            result = cell
-                            break
-                
-                priority = parse_value_priority(result)
-                if priority[0] == 0: continue
+                # 開始處理 (可能包含虛擬行)
+                for proc_row in rows_to_process:
+                    clean_row = [clean_text(cell) for cell in proc_row]
+                    row_txt = "".join(clean_row).lower()
+                    if "test item" in row_txt or "result" in row_txt: continue
+                    if not any(clean_row): continue
+                    
+                    target_item_col = item_idx if item_idx != -1 else 0
+                    if target_item_col >= len(clean_row): continue
+                    item_name = clean_row[target_item_col]
+                    item_name_lower = item_name.lower()
+                    
+                    if "pvc" in item_name_lower: continue
 
-                for target_key, keywords in SIMPLE_KEYWORDS.items():
-                    if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
-                    if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
-                    if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
-                    if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
+                    result = ""
+                    if result_idx != -1 and result_idx < len(clean_row):
+                        result = clean_row[result_idx]
+                    
+                    temp_priority = parse_value_priority(result)
+                    if temp_priority[0] == 0:
+                        for cell in reversed(clean_row):
+                            c_lower = cell.lower()
+                            if not cell: continue
+                            if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
+                                result = cell
+                                break
+                            if re.search(r"^\d+(\.\d+)?", cell):
+                                if is_suspicious_limit_value(cell): continue
+                                result = cell
+                                break
+                    
+                    priority = parse_value_priority(result)
+                    if priority[0] == 0: continue
 
-                    for kw in keywords:
-                        if kw.lower() in item_name_lower:
-                            if target_key == "PFOS" and "related" in item_name_lower: continue 
-                            data_pool[target_key].append({"priority": priority, "filename": filename})
-                            break
-                for group_key, keywords in GROUP_KEYWORDS.items():
-                    for kw in keywords:
-                        if kw.lower() in item_name_lower:
-                            file_group_data[group_key].append(priority)
-                            break
+                    for target_key, keywords in SIMPLE_KEYWORDS.items():
+                        # v63.14 Fix: Table-based parsing defense
+                        if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
+                        
+                        if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
+                        if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
+                        if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
+
+                        for kw in keywords:
+                            if kw.lower() in item_name_lower:
+                                if target_key == "PFOS" and "related" in item_name_lower: continue 
+                                data_pool[target_key].append({"priority": priority, "filename": filename})
+                                break
+                    for group_key, keywords in GROUP_KEYWORDS.items():
+                        for kw in keywords:
+                            if kw.lower() in item_name_lower:
+                                file_group_data[group_key].append(priority)
+                                break
 
     # Text Rescue (SGS Only)
     if company == "SGS":
@@ -717,9 +751,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.15", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.15 CTI 多樣品聚合版)")
-st.info("💡 v63.15：CTI 引擎新增「多樣品聚合 (Multi-Sample Aggregation)」功能，能自動掃描多個結果欄位並取最大值，同時確保日期與 SGS 防禦機制不受影響。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.16", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.16 SGS 變種格式修復版)")
+st.info("💡 v63.16：修復三大 SGS 變種問題：1. Parameter 欄位識別 2. A.C006 結果欄定位 3. HF 氟氯動態拆行。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -741,7 +775,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.15.xlsx",
+            file_name="SGS_CTI_Summary_v63.16.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
