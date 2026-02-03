@@ -234,6 +234,7 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
+            # v60.5 Defenses
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -382,12 +383,12 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v63.6: 跨行關聯 + Type Error Fix)
+# 4. CTI 專用引擎 (v63.7: Active Lookahead + v63.6 Logic)
 # =============================================================================
 
-def extract_dates_v63_5_cti(text):
+def extract_dates_v63_7_cti(text):
     """
-    v63.5: 綜合解決方案 (跨行上下文感知)
+    v63.7: Active Lookahead (主動檢查下一行)
     """
     lines = text.split('\n')
     candidates = []
@@ -396,78 +397,68 @@ def extract_dates_v63_5_cti(text):
     poison_kw = ["approve", "approved", "receive", "received", "receipt", "expiry", "valid", "收样"]
     backup_kw = ["testing period", "test period", "检测周期", "测试周期"]
 
+    # 暴力清洗匹配模式
     pat_mdy_clean = r"([a-zA-Z]{3,})\s+(3[01]|[12][0-9]|0?[1-9])\s+(20\d{2})"
     pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
     pat_dot = r"(20\d{2})\.(0?[1-9]|1[0-2])\.(3[01]|[12][0-9]|0?[1-9])"
 
-    expect_next_date = False 
-
-    for line in lines:
-        line_lower = line.lower()
-        clean_line = line.replace(".", " ").replace(",", " ") 
+    # 輔助函式：從單行文字中提取日期 (返回 list of dates)
+    def parse_dates_from_line(txt):
+        found = []
+        clean_txt = txt.replace(".", " ").replace(",", " ")
         
-        found_in_line = False
-
-        # 1. 嘗試提取日期
+        # 中文/點號
         for pat in [pat_chinese, pat_dot]:
-            matches = re.finditer(pat, line)
-            for m in matches:
+            for m in re.finditer(pat, txt):
                 try:
                     dt = datetime.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d")
-                    if is_valid_date(dt): 
-                        found_in_line = True
-                        score = 1
-                        if expect_next_date: score = 100 
-                        elif any(bad in line_lower for bad in poison_kw): score = -1000
-                        elif any(good in line_lower for good in bonus_kw): score = 100
-                        elif any(back in line_lower for back in backup_kw): score = 10
-                        candidates.append((score, dt))
+                    if is_valid_date(dt): found.append(dt)
                 except: pass
-
-        matches_mdy = re.finditer(pat_mdy_clean, clean_line)
-        for m in matches_mdy:
+        
+        # 英文 MDY (暴力清洗)
+        for m in re.finditer(pat_mdy_clean, clean_txt):
             try:
                 dt_str = f"{m.group(1)} {m.group(2)} {m.group(3)}"
                 for fmt in ["%b %d %Y", "%B %d %Y"]:
                     try:
                         dt = datetime.strptime(dt_str, fmt)
-                        if is_valid_date(dt): 
-                            found_in_line = True
-                            score = 1
-                            if expect_next_date: score = 100 
-                            elif any(bad in line_lower for bad in poison_kw): score = -1000
-                            elif any(good in line_lower for good in bonus_kw): score = 100
-                            elif any(back in line_lower for back in backup_kw): score = 10
-                            candidates.append((score, dt))
+                        if is_valid_date(dt): found.append(dt)
                     except: pass
             except: pass
-        
-        clean_line_ymd = clean_line.replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
-        clean_line_ymd = " ".join(clean_line_ymd.split())
-        matches_ymd = re.finditer(r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(3[01]|[12][0-9]|0?[1-9])", clean_line_ymd)
-        for m in matches_ymd:
+            
+        # YMD
+        clean_ymd = clean_txt.replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
+        clean_ymd = " ".join(clean_ymd.split())
+        for m in re.finditer(r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(3[01]|[12][0-9]|0?[1-9])", clean_ymd):
             try:
                 dt_str = " ".join(m.groups())
                 dt = datetime.strptime(dt_str, "%Y %m %d")
-                if is_valid_date(dt): 
-                    found_in_line = True
-                    score = 1
-                    if expect_next_date: score = 100
-                    elif any(bad in line_lower for bad in poison_kw): score = -1000
-                    elif any(good in line_lower for good in bonus_kw): score = 100
-                    elif any(back in line_lower for back in backup_kw): score = 10
-                    candidates.append((score, dt))
+                if is_valid_date(dt): found.append(dt)
             except: pass
+            
+        return found
 
-        # 2. 旗標控制
-        if found_in_line:
-            expect_next_date = False 
-        else:
-            if any(k in line_lower for k in ["date", "日期"]) and not any(bad in line_lower for bad in poison_kw):
-                expect_next_date = True
-            else:
-                if line.strip(): 
-                    expect_next_date = False
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        
+        # 1. 正常提取本行日期
+        dates_in_line = parse_dates_from_line(line)
+        for dt in dates_in_line:
+            score = 1
+            if any(bad in line_lower for bad in poison_kw): score = -1000
+            elif any(good in line_lower for good in bonus_kw): score = 100
+            elif any(back in line_lower for back in backup_kw): score = 10
+            candidates.append((score, dt))
+            
+        # 2. Lookahead (v63.7 核心)
+        # 如果本行看起來是 Date 標題，且沒有毒，就去偷看下一行
+        if any(k in line_lower for k in ["date", "日期"]) and not any(bad in line_lower for bad in poison_kw):
+            if i + 1 < len(lines):
+                next_line = lines[i+1]
+                # 強制提取下一行，並給予高分
+                next_dates = parse_dates_from_line(next_line)
+                for dt in next_dates:
+                    candidates.append((100, dt)) # 繼承 Date 標題的 100 分
 
     return candidates
 
@@ -477,15 +468,13 @@ def process_cti_engine(pdf, filename):
     text_for_dates = ""
     for p in pdf.pages[:3]: text_for_dates += (p.extract_text() or "") + "\n"
     
-    date_candidates = extract_dates_v63_5_cti(text_for_dates)
+    date_candidates = extract_dates_v63_7_cti(text_for_dates)
     final_dates = []
     
     if date_candidates:
-        # v63.6 Fix: 這裡不能把 tuple 拆開，否則 sort 時會因為 datetime[0] 而報錯
         valid_entries = [entry for entry in date_candidates if entry[0] > 0]
         if valid_entries:
             # 排序：分數高優先(desc)，日期晚優先(desc)
-            # x[0] 是分數, x[1] 是日期物件
             best_entry = sorted(valid_entries, key=lambda x: (x[0], x[1]), reverse=True)[0]
             final_dates.append(best_entry)
 
@@ -715,9 +704,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.6", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.6 CTI 日期修復版)")
-st.info("💡 v63.6：修復 CTI 引擎日期排序錯誤 (TypeError)，同時保留 v63.5 的跨行關聯修復與特赦邏輯。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.7", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.7 CTI 主動向前抓取版)")
+st.info("💡 v63.7：CTI 日期引擎升級為主動向前抓取 (Active Lookahead)，完美解決 Date 標題與日期斷行的排版問題，確保抓到 3/15 而非 3/7。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -739,7 +728,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.6.xlsx",
+            file_name="SGS_CTI_Summary_v63.7.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
