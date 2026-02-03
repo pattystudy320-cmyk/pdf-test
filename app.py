@@ -67,7 +67,7 @@ MSDS_HEADER_KEYWORDS = [
     "content", "composition", "concentration", "含量", "成分"
 ]
 
-# v63.11: 手動月份對照表 (解決 Locale 問題)
+# 手動月份對照表 (解決 Locale 問題)
 MONTH_MAP = {
     'jan': 1, 'january': 1,
     'feb': 2, 'february': 2,
@@ -398,12 +398,12 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v63.11: Manual Parsing + Max Date Priority)
+# 4. CTI 專用引擎 (v63.12: Token Parsing + Max Date Priority)
 # =============================================================================
 
-def extract_dates_v63_11_cti(text):
+def extract_dates_v63_12_cti(text):
     """
-    v63.11: 使用手動月份解析，避開 Locale 問題；保留 Max Date 邏輯。
+    v63.12: Token Parsing (單詞接龍) - 徹底解決 Regex 與 Spacing 問題
     """
     lines = text.split('\n')
     candidates = []
@@ -412,17 +412,14 @@ def extract_dates_v63_11_cti(text):
     poison_kw = ["approve", "approved", "receive", "received", "receipt", "expiry", "valid", "收样"]
     backup_kw = ["testing period", "test period", "检测周期", "测试周期"]
 
-    # 英文 MDY (暴力清洗後) -> 匹配小寫 mar 15 2022
-    pat_mdy_clean = r"\b([a-z]{3,})\s+(\d{1,2})\s+(20\d{2})\b"
+    # 中文 YMD 格式 regex (因為中文通常沒有空格問題)
     pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
     pat_dot = r"(20\d{2})\.(0?[1-9]|1[0-2])\.(3[01]|[12][0-9]|0?[1-9])"
 
     for i, line in enumerate(lines):
         line_lower = line.lower()
-        # 強力清洗：非英數轉空格，轉小寫
-        clean_line = re.sub(r'[^a-z0-9]', ' ', line_lower)
         
-        # 1. 中文與點號格式 (標準匹配)
+        # 1. 優先嘗試中文/點號格式
         for pat in [pat_chinese, pat_dot]:
             matches = re.finditer(pat, line)
             for m in matches:
@@ -436,34 +433,33 @@ def extract_dates_v63_11_cti(text):
                         candidates.append((score, dt))
                 except: pass
 
-        # 2. 英文 MDY (手動解析)
-        matches_mdy = re.finditer(pat_mdy_clean, clean_line)
-        for m in matches_mdy:
-            try:
-                mon_str = m.group(1) # e.g. 'mar'
-                day_str = m.group(2)
-                year_str = m.group(3)
-                
-                # 查表轉換月份
-                if mon_str in MONTH_MAP:
-                    month_num = MONTH_MAP[mon_str]
-                    dt = datetime(int(year_str), month_num, int(day_str))
-                    
-                    if is_valid_date(dt): 
-                        score = 1
-                        if any(bad in line_lower for bad in poison_kw): score = -1000
-                        elif any(good in line_lower for good in bonus_kw): score = 100
-                        elif any(back in line_lower for back in backup_kw): score = 10
-                        candidates.append((score, dt))
-            except: pass
+        # 2. Token Parsing (英文 MDY / DMY) - 核心修正
+        # 將所有非英數字元替換為空格，然後切分
+        clean_line = re.sub(r'[^a-z0-9]', ' ', line_lower)
+        tokens = clean_line.split()
         
-        # 3. YMD 補漏
-        # clean_line 已經全是空格分隔的數字和英文
-        matches_ymd = re.finditer(r"\b(20\d{2})\s+(0?[1-9]|1[0-2])\s+(3[01]|[12][0-9]|0?[1-9])\b", clean_line)
-        for m in matches_ymd:
+        # 掃描 tokens
+        for idx in range(len(tokens) - 2):
             try:
-                dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-                if is_valid_date(dt): 
+                t1, t2, t3 = tokens[idx], tokens[idx+1], tokens[idx+2]
+                dt = None
+                
+                # 模式 A: MDY (Mar 15 2022)
+                if t1 in MONTH_MAP and t2.isdigit() and t3.isdigit() and len(t3) == 4:
+                    m, d, y = MONTH_MAP[t1], int(t2), int(t3)
+                    dt = datetime(y, m, d)
+                
+                # 模式 B: DMY (15 Mar 2022)
+                elif t1.isdigit() and t2 in MONTH_MAP and t3.isdigit() and len(t3) == 4:
+                    d, m, y = int(t1), MONTH_MAP[t2], int(t3)
+                    dt = datetime(y, m, d)
+                
+                # 模式 C: YMD (2022 03 15) - 補漏
+                elif t1.isdigit() and len(t1) == 4 and t2.isdigit() and t3.isdigit():
+                    y, m, d = int(t1), int(t2), int(t3)
+                    dt = datetime(y, m, d)
+
+                if dt and is_valid_date(dt):
                     score = 1
                     if any(bad in line_lower for bad in poison_kw): score = -1000
                     elif any(good in line_lower for good in bonus_kw): score = 100
@@ -479,16 +475,14 @@ def process_cti_engine(pdf, filename):
     text_for_dates = ""
     for p in pdf.pages[:3]: text_for_dates += (p.extract_text() or "") + "\n"
     
-    # 使用 v63.11 手動解析版
-    date_candidates = extract_dates_v63_11_cti(text_for_dates)
+    # 使用 v63.12 Token Parsing 版
+    date_candidates = extract_dates_v63_12_cti(text_for_dates)
     final_dates = []
     
     if date_candidates:
-        # v63.10/11 核心: 篩選正分日期，然後取最大(最晚)的日期
+        # Max Date Priority
         valid_entries = [entry for entry in date_candidates if entry[0] > 0]
-        
         if valid_entries:
-            # 排序規則: 日期越晚越大 (reverse=True)
             best_entry = sorted(valid_entries, key=lambda x: (x[1], x[0]), reverse=True)[0]
             final_dates.append(best_entry)
 
@@ -718,9 +712,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.11", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.11 CTI 語系獨立終極版)")
-st.info("💡 v63.11：徹底解決月份語系解析問題 (Locale Issue)，並維持日期最大化邏輯，確保精準抓取 CTI 報告日期。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.12", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.12 CTI Token Parsing 版)")
+st.info("💡 v63.12：CTI 日期引擎啟用單詞接龍 (Token Parsing)，徹底擺脫 Regex 僵化與標點符號干擾，精準鎖定任意格式日期。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -742,7 +736,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.11.xlsx",
+            file_name="SGS_CTI_Summary_v63.12.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
