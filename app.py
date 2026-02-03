@@ -234,7 +234,6 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # v60.5 Defenses
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -383,14 +382,15 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v63.8: Search Window Expansion)
+# 4. CTI 專用引擎 (v63.9: Footer Bonus)
 # =============================================================================
 
-def extract_dates_v63_8_cti(text):
+def extract_dates_v63_9_cti(text):
     """
-    v63.8: 擴大搜索半徑 (穿透簽名檔)
+    v63.9: 頁尾加權 (Footer Bonus) + 主動穿透 (Lookahead)
     """
     lines = text.split('\n')
+    total_lines = len(lines)
     candidates = []
     
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期", "签发日期"]
@@ -448,23 +448,30 @@ def extract_dates_v63_8_cti(text):
             if any(bad in line_lower for bad in poison_kw): score = -1000
             elif any(good in line_lower for good in bonus_kw): score = 100
             elif any(back in line_lower for back in backup_kw): score = 10
+            
+            # v63.9 Footer Bonus: 如果在後半段且不是 Testing Period，加分
+            if i > (total_lines * 0.5) and not any(back in line_lower for back in backup_kw) and score > -100:
+                score += 20
+                
             candidates.append((score, dt))
             
-        # 2. Window Search (v63.8 核心)
+        # 2. Window Search (Lookahead)
         # 發現 Date 標題，啟動雷達，向下掃描 4 行
         if any(k in line_lower for k in ["date", "日期"]) and not any(bad in line_lower for bad in poison_kw):
-            # 搜索 i+1 到 i+4
             for offset in range(1, 5):
                 if i + offset >= len(lines): break
                 
                 next_line = lines[i + offset]
                 next_dates = parse_dates_from_line(next_line)
                 
-                # 如果這行有抓到日期，就認定它是 Date 的歸屬
                 if next_dates:
                     for dt in next_dates:
-                        candidates.append((100, dt)) # 繼承 100 分
-                    break # 找到最近的一個就停止，避免抓到更遠的雜訊
+                        # 繼承 100 分，且如果該行在 Footer，一樣給予加分
+                        base_score = 100
+                        if (i + offset) > (total_lines * 0.5): # 檢查實際日期行的位置
+                            base_score += 20
+                        candidates.append((base_score, dt)) 
+                    break 
 
     return candidates
 
@@ -474,7 +481,7 @@ def process_cti_engine(pdf, filename):
     text_for_dates = ""
     for p in pdf.pages[:3]: text_for_dates += (p.extract_text() or "") + "\n"
     
-    date_candidates = extract_dates_v63_8_cti(text_for_dates)
+    date_candidates = extract_dates_v63_9_cti(text_for_dates)
     final_dates = []
     
     if date_candidates:
@@ -710,9 +717,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.8", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.8 CTI 簽名檔穿透版)")
-st.info("💡 v63.8：CTI 日期引擎擴大搜索範圍 (Lookahead Window)，成功穿透簽名檔抓取報告日期。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.9", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.9 CTI 頁尾加權終極版)")
+st.info("💡 v63.9：CTI 日期引擎引入「頁尾加權機制」，即使關鍵字斷聯，只要日期出現在頁尾，也能擊敗 Testing Period。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -734,7 +741,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.8.xlsx",
+            file_name="SGS_CTI_Summary_v63.9.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
