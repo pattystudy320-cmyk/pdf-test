@@ -383,12 +383,12 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v63.7: Active Lookahead + v63.6 Logic)
+# 4. CTI 專用引擎 (v63.8: Search Window Expansion)
 # =============================================================================
 
-def extract_dates_v63_7_cti(text):
+def extract_dates_v63_8_cti(text):
     """
-    v63.7: Active Lookahead (主動檢查下一行)
+    v63.8: 擴大搜索半徑 (穿透簽名檔)
     """
     lines = text.split('\n')
     candidates = []
@@ -450,15 +450,21 @@ def extract_dates_v63_7_cti(text):
             elif any(back in line_lower for back in backup_kw): score = 10
             candidates.append((score, dt))
             
-        # 2. Lookahead (v63.7 核心)
-        # 如果本行看起來是 Date 標題，且沒有毒，就去偷看下一行
+        # 2. Window Search (v63.8 核心)
+        # 發現 Date 標題，啟動雷達，向下掃描 4 行
         if any(k in line_lower for k in ["date", "日期"]) and not any(bad in line_lower for bad in poison_kw):
-            if i + 1 < len(lines):
-                next_line = lines[i+1]
-                # 強制提取下一行，並給予高分
+            # 搜索 i+1 到 i+4
+            for offset in range(1, 5):
+                if i + offset >= len(lines): break
+                
+                next_line = lines[i + offset]
                 next_dates = parse_dates_from_line(next_line)
-                for dt in next_dates:
-                    candidates.append((100, dt)) # 繼承 Date 標題的 100 分
+                
+                # 如果這行有抓到日期，就認定它是 Date 的歸屬
+                if next_dates:
+                    for dt in next_dates:
+                        candidates.append((100, dt)) # 繼承 100 分
+                    break # 找到最近的一個就停止，避免抓到更遠的雜訊
 
     return candidates
 
@@ -468,7 +474,7 @@ def process_cti_engine(pdf, filename):
     text_for_dates = ""
     for p in pdf.pages[:3]: text_for_dates += (p.extract_text() or "") + "\n"
     
-    date_candidates = extract_dates_v63_7_cti(text_for_dates)
+    date_candidates = extract_dates_v63_8_cti(text_for_dates)
     final_dates = []
     
     if date_candidates:
@@ -704,9 +710,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.7", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.7 CTI 主動向前抓取版)")
-st.info("💡 v63.7：CTI 日期引擎升級為主動向前抓取 (Active Lookahead)，完美解決 Date 標題與日期斷行的排版問題，確保抓到 3/15 而非 3/7。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.8", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.8 CTI 簽名檔穿透版)")
+st.info("💡 v63.8：CTI 日期引擎擴大搜索範圍 (Lookahead Window)，成功穿透簽名檔抓取報告日期。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -728,7 +734,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.7.xlsx",
+            file_name="SGS_CTI_Summary_v63.8.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
