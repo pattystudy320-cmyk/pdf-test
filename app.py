@@ -140,7 +140,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 3. 引擎 A: 標準引擎 (Standard Engine) - v63.19 升級版
+# 3. 引擎 A: 標準引擎 (Standard Engine) - v63.20 邏輯前移版
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -208,13 +208,14 @@ def identify_columns_v60(table, company):
             txt = clean_text(cell).lower()
             if not txt: continue
             
+            # v63.20: Parameter 識別
             if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt or "parameter" in txt:
                 if item_idx == -1: item_idx = c_idx
             if "mdl" in txt or "loq" in txt:
                 if mdl_idx == -1: mdl_idx = c_idx
             
             if company == "SGS":
-                 # v63.19 Fix: 增強 A.C006 格式的 Regex
+                 # v63.20: A.C006 Regex 支援
                  if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt) or 
                     re.search(r"^[a-z]?\s*\.?\s*[a-z]?\d+", txt) or re.search(r"[a-z]\s*\.\s*[a-z]\d+", txt) or "no." in txt):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
@@ -223,12 +224,30 @@ def identify_columns_v60(table, company):
                 if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
                     if result_idx == -1: result_idx = c_idx
     
-    # MDL 燈塔戰術
-    if result_idx == -1 and company == "SGS":
-        if mdl_idx != -1 and mdl_idx > 0:
-            result_idx = mdl_idx - 1
-        elif mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
-            result_idx = mdl_idx + 1
+    # v63.20 Fix: 邏輯前移 (Shift Left) - MDL 智慧定位搬到這裡
+    # 確保在決定 is_reference_table 之前，先嘗試用 MDL 救回 result_idx
+    if result_idx == -1 and company == "SGS" and mdl_idx != -1:
+        left_idx = mdl_idx - 1
+        left_score = 0
+        if left_idx >= 0:
+            for r in range(1, min(5, len(table))):
+                val = clean_text(table[r][left_idx]).lower()
+                if "n.d." in val or re.search(r"\d", val): left_score += 1
+                if "unit" in val or "mg/kg" in val or "method" in val: left_score -= 5
+        
+        right_idx = mdl_idx + 1
+        right_score = 0
+        if right_idx < len(table[0]):
+            for r in range(1, min(5, len(table))):
+                val = clean_text(table[r][right_idx]).lower()
+                if "n.d." in val or re.search(r"\d", val): right_score += 1
+                if "unit" in val or "mg/kg" in val or "method" in val: right_score -= 5
+        
+        # 判定
+        if right_score > left_score and right_score > 0:
+            result_idx = right_idx
+        elif left_score > 0:
+            result_idx = left_idx
 
     is_reference_table = False
     if is_msds_table: is_reference_table = True
@@ -254,7 +273,9 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
+            # v63.20 Defense: indeno
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue 
+            
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
             if key == "Pb" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
@@ -322,39 +343,17 @@ def process_standard_engine(pdf, filename, company):
         tables = page.extract_tables()
         for table in tables:
             if not table or len(table) < 2: continue
+            # v63.20: 調用內建智慧定位的 identify_columns
             item_idx, result_idx, is_skip, mdl_idx = identify_columns_v60(table, company)
             if is_skip: continue
             
-            # v63.19 Fix: 智慧欄位偵測 (Smart Column Detection)
-            if result_idx == -1 and company == "SGS" and mdl_idx != -1:
-                left_idx = mdl_idx - 1
-                left_score = 0
-                if left_idx >= 0:
-                    for r in range(1, min(5, len(table))):
-                        val = clean_text(table[r][left_idx]).lower()
-                        if "n.d." in val or re.search(r"\d", val): left_score += 1
-                        if "unit" in val or "mg/kg" in val or "method" in val: left_score -= 5
-                
-                right_idx = mdl_idx + 1
-                right_score = 0
-                if right_idx < len(table[0]):
-                    for r in range(1, min(5, len(table))):
-                        val = clean_text(table[r][right_idx]).lower()
-                        if "n.d." in val or re.search(r"\d", val): right_score += 1
-                        if "unit" in val or "mg/kg" in val or "method" in val: right_score -= 5
-                
-                if right_score > left_score and right_score > 0:
-                    result_idx = right_idx
-                elif left_score > 0:
-                    result_idx = left_idx
-
             for row in table:
                 raw_item_cell = str(row[item_idx]) if item_idx < len(row) and row[item_idx] else ""
                 raw_result_cell = str(row[result_idx]) if result_idx != -1 and result_idx < len(row) and row[result_idx] else ""
                 
                 rows_to_process = []
                 
-                # v63.19 Fix: 強力拆行清洗
+                # v63.20: 強力拆行清洗
                 if "\n" in raw_item_cell:
                     split_items = [x.strip() for x in raw_item_cell.split('\n') if x.strip()]
                     
@@ -424,6 +423,7 @@ def process_standard_engine(pdf, filename, company):
                             if kw.lower() in item_name_lower:
                                 if target_key == "PFOS" and "related" in item_name_lower: continue 
                                 data_pool[target_key].append({"priority": priority, "filename": filename})
+                                # v63.20 Fix: 確保無 break
                     
                     for group_key, keywords in GROUP_KEYWORDS.items():
                         for kw in keywords:
@@ -431,6 +431,7 @@ def process_standard_engine(pdf, filename, company):
                                 file_group_data[group_key].append(priority)
                                 break
 
+    # Text Rescue (SGS Only)
     if company == "SGS":
         missing_targets = []
         pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
@@ -577,21 +578,21 @@ def process_cti_engine(pdf, filename):
     return data_pool, final_dates
 
 # =============================================================================
-# 5. 馬來西亞專用引擎 (v63.19: 全面移植標準引擎邏輯)
+# 5. 馬來西亞專用引擎 (v63.20: 全面移植與升級)
 # =============================================================================
 
 def process_malaysia_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     
-    # 1. 移植 v63.13 全域串流日期分析
+    # 1. 移植 v63.13 全域串流日期分析 (解決 RoHS2 日期問題)
     text_for_dates = ""
     for p in pdf.pages[:3]: 
         text_for_dates += (p.extract_text() or "") + " " 
     
     date_candidates = extract_dates_v63_13_global(text_for_dates)
     
-    # 2. 移植 v63.19 標準引擎表格邏輯
-    company = "SGS" # 強制設定為 SGS 以啟用相關邏輯
+    # 2. 移植 v63.20 標準引擎表格邏輯
+    company = "SGS" 
     file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
 
     for page in pdf.pages:
@@ -599,40 +600,17 @@ def process_malaysia_engine(pdf, filename):
         for table in tables:
             if not table or len(table) < 2: continue
             
-            # 使用增強版的 identify_columns_v60
+            # 使用增強版的 identify_columns_v60 (含 Parameter 與內建智慧定位)
             item_idx, result_idx, is_skip, mdl_idx = identify_columns_v60(table, company)
             if is_skip: continue
             
-            # 移植智慧欄位偵測
-            if result_idx == -1 and mdl_idx != -1:
-                left_idx = mdl_idx - 1
-                left_score = 0
-                if left_idx >= 0:
-                    for r in range(1, min(5, len(table))):
-                        val = clean_text(table[r][left_idx]).lower()
-                        if "n.d." in val or re.search(r"\d", val): left_score += 1
-                        if "unit" in val or "mg/kg" in val or "method" in val: left_score -= 5
-                
-                right_idx = mdl_idx + 1
-                right_score = 0
-                if right_idx < len(table[0]):
-                    for r in range(1, min(5, len(table))):
-                        val = clean_text(table[r][right_idx]).lower()
-                        if "n.d." in val or re.search(r"\d", val): right_score += 1
-                        if "unit" in val or "mg/kg" in val or "method" in val: right_score -= 5
-                
-                if right_score > left_score and right_score > 0:
-                    result_idx = right_idx
-                elif left_score > 0:
-                    result_idx = left_idx
-
             for row in table:
                 raw_item_cell = str(row[item_idx]) if item_idx < len(row) and row[item_idx] else ""
                 raw_result_cell = str(row[result_idx]) if result_idx != -1 and result_idx < len(row) and row[result_idx] else ""
                 
                 rows_to_process = []
                 
-                # 移植強力拆行清洗
+                # 移植強力拆行清洗 (解決 HF F/Cl)
                 if "\n" in raw_item_cell:
                     split_items = [x.strip() for x in raw_item_cell.split('\n') if x.strip()]
                     if "\n" in raw_result_cell:
@@ -776,9 +754,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.19", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.19 引擎全面升級版)")
-st.info("💡 v63.19：將標準引擎的強大功能（智慧欄位、強力拆行、全域日期）全面移植至馬來西亞引擎，並強化 A.C006 格式支援，徹底解決 HF/RoHS2/CMR 三大難題。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.20", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.20 核心邏輯重構版)")
+st.info("💡 v63.20：將「智慧欄位偵測」移至核心以解決 CMR 表格被誤殺問題，並將最強大的表格與日期邏輯全面移植給馬來西亞引擎，確保 HF/RoHS2/CMR 皆能完美解析。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -800,7 +778,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.19.xlsx",
+            file_name="SGS_CTI_Summary_v63.20.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
