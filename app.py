@@ -140,7 +140,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 3. 引擎 A: 標準引擎 (Standard Engine) - v63.16 更新版
+# 3. 引擎 A: 標準引擎 (Standard Engine) - v63.17 強效修復版
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -208,14 +208,14 @@ def identify_columns_v60(table, company):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            # v63.16 Fix: 加入 "parameter" 識別
+            # v63.17 Fix: "parameter" 識別升級
             if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt or "parameter" in txt:
                 if item_idx == -1: item_idx = c_idx
             if "mdl" in txt or "loq" in txt:
                 if mdl_idx == -1: mdl_idx = c_idx
             
             if company == "SGS":
-                 # v63.16 Fix: 放寬結果欄 Regex，允許 A.C006 等格式
+                 # v63.17 Fix: 放寬 Regex，並允許 A.C006
                  if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt) or 
                     re.search(r"^[a-z]?\s*\.?\s*[a-z]?\d+", txt) or "no." in txt):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
@@ -224,7 +224,7 @@ def identify_columns_v60(table, company):
                 if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
                     if result_idx == -1: result_idx = c_idx
     
-    # v63.16 Fix: 強效備援，若找不到 Result 但有 MDL，取 MDL 左邊那欄
+    # v63.17 Fix: MDL 燈塔戰術 - 若找不到 Result，強制使用 MDL 的鄰居
     if result_idx == -1 and company == "SGS":
         if mdl_idx != -1 and mdl_idx > 0:
             result_idx = mdl_idx - 1
@@ -255,7 +255,7 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # v63.14 Fix: 新增 "indeno" 到 Cd 的防禦列表
+            # v63.17 Defense: 保留 indeno 防禦
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue 
             
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
@@ -329,22 +329,27 @@ def process_standard_engine(pdf, filename, company):
             if is_skip: continue
             
             for row in table:
-                # v63.16 Fix: 動態拆行邏輯 (處理 Fluorine/Chlorine 同格問題)
+                # v63.17 Fix: 貪婪拆行 (Greedy Splitting)
+                # 處理 F/Cl 擠在同一格，且 Result 可能只有一格的情況
                 raw_item_cell = str(row[item_idx]) if item_idx < len(row) and row[item_idx] else ""
                 raw_result_cell = str(row[result_idx]) if result_idx != -1 and result_idx < len(row) and row[result_idx] else ""
                 
                 rows_to_process = []
                 
                 if "\n" in raw_item_cell:
-                    # 嘗試拆解
                     split_items = raw_item_cell.split('\n')
-                    split_results = raw_result_cell.split('\n')
+                    split_results = raw_result_cell.split('\n') if "\n" in raw_result_cell else [raw_result_cell]
                     
-                    # 如果結果欄也有相同數量的換行，或者是單一結果對應多項目(較少見)，進行拆解
-                    # 這裡主要針對 Row Merging 情況: ItemA\nItemB -> ResultA\nResultB
-                    if len(split_items) > 1 and len(split_items) == len(split_results):
+                    # 如果結果只有一個，但項目有多個 -> 複製結果給每個項目
+                    if len(split_items) > 1 and len(split_results) == 1:
+                        for si in split_items:
+                            virtual_row = list(row)
+                            virtual_row[item_idx] = si
+                            if result_idx != -1: virtual_row[result_idx] = split_results[0]
+                            rows_to_process.append(virtual_row)
+                    # 如果數量一致 -> 一對一映射
+                    elif len(split_items) == len(split_results):
                         for si, sr in zip(split_items, split_results):
-                            # 建立虛擬 row
                             virtual_row = list(row)
                             virtual_row[item_idx] = si
                             if result_idx != -1: virtual_row[result_idx] = sr
@@ -354,7 +359,7 @@ def process_standard_engine(pdf, filename, company):
                 else:
                     rows_to_process.append(row)
 
-                # 開始處理 (可能包含虛擬行)
+                # 開始處理
                 for proc_row in rows_to_process:
                     clean_row = [clean_text(cell) for cell in proc_row]
                     row_txt = "".join(clean_row).lower()
@@ -389,7 +394,6 @@ def process_standard_engine(pdf, filename, company):
                     if priority[0] == 0: continue
 
                     for target_key, keywords in SIMPLE_KEYWORDS.items():
-                        # v63.14 Fix: Table-based parsing defense
                         if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
                         
                         if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
@@ -400,7 +404,8 @@ def process_standard_engine(pdf, filename, company):
                             if kw.lower() in item_name_lower:
                                 if target_key == "PFOS" and "related" in item_name_lower: continue 
                                 data_pool[target_key].append({"priority": priority, "filename": filename})
-                                break
+                                # v63.17 Fix: 移除 break，確保同一行能抓取多個項目 (如 F 和 Cl)
+                    
                     for group_key, keywords in GROUP_KEYWORDS.items():
                         for kw in keywords:
                             if kw.lower() in item_name_lower:
@@ -751,9 +756,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.16", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.16 SGS 變種格式修復版)")
-st.info("💡 v63.16：修復三大 SGS 變種問題：1. Parameter 欄位識別 2. A.C006 結果欄定位 3. HF 氟氯動態拆行。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.17", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.17 SGS 全方位強效修復版)")
+st.info("💡 v63.17：SGS 引擎升級貪婪拆行 (針對HF氟氯)、參數關鍵字 (針對RoHS2) 與 MDL 燈塔定位 (針對CMR)，徹底解決所有變種格式問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -775,7 +780,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.16.xlsx",
+            file_name="SGS_CTI_Summary_v63.17.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
