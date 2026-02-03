@@ -234,7 +234,6 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # v60.5 Defenses
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -383,19 +382,20 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v63.4: 特赦 Testing Period)
+# 4. CTI 專用引擎 (v63.5: 跨行關聯 + 特赦備胎 + 暴力清洗)
 # =============================================================================
 
-def extract_dates_v63_4_cti(text):
+def extract_dates_v63_5_cti(text):
     """
-    v63.4: 暴力清洗 + 特赦 Testing Period
+    v63.5: 綜合解決方案 (跨行上下文感知)
     """
     lines = text.split('\n')
     candidates = []
     
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期", "签发日期"]
-    # v63.4: Testing Period 不再是死刑 (-1000)，而是備胎 (10)
+    # 這些詞彙通常包含日期但不是報告日期，扣分
     poison_kw = ["approve", "approved", "receive", "received", "receipt", "expiry", "valid", "收样"]
+    # 這些是備胎，給予及格分
     backup_kw = ["testing period", "test period", "检测周期", "测试周期"]
 
     # 暴力清洗匹配模式 (空格分隔)
@@ -403,36 +403,35 @@ def extract_dates_v63_4_cti(text):
     pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
     pat_dot = r"(20\d{2})\.(0?[1-9]|1[0-2])\.(3[01]|[12][0-9]|0?[1-9])"
 
+    expect_next_date = False # 跨行旗標
+
     for line in lines:
         line_lower = line.lower()
-        score = 1
-        
-        # 評分邏輯 (v63.4 關鍵修正)
-        if any(bad in line_lower for bad in poison_kw): 
-            score = -1000 
-        elif any(good in line_lower for good in bonus_kw): 
-            score = 100 
-        elif any(back in line_lower for back in backup_kw):
-            score = 10 # 備胎分數，比普通日期(1)高，但比Issue Date(100)低
-        
-        # 1. 中文與點號格式
-        matches_cn = re.finditer(pat_chinese, line)
-        for m in matches_cn:
-            try:
-                dt = datetime.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d")
-                if is_valid_date(dt): candidates.append((score, dt))
-            except: pass
-
-        matches_dot = re.finditer(pat_dot, line)
-        for m in matches_dot:
-            try:
-                dt = datetime.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d")
-                if is_valid_date(dt): candidates.append((score, dt))
-            except: pass
-
-        # 2. 暴力清洗 (Brute Force Cleaning)
         clean_line = line.replace(".", " ").replace(",", " ") 
         
+        found_in_line = False # 本行是否找到日期
+
+        # 1. 嘗試提取日期
+        # 中文/點號
+        for pat in [pat_chinese, pat_dot]:
+            matches = re.finditer(pat, line)
+            for m in matches:
+                try:
+                    dt = datetime.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d")
+                    if is_valid_date(dt): 
+                        found_in_line = True
+                        
+                        # 評分
+                        score = 1
+                        if expect_next_date: score = 100 # 繼承上一行的期待
+                        elif any(bad in line_lower for bad in poison_kw): score = -1000
+                        elif any(good in line_lower for good in bonus_kw): score = 100
+                        elif any(back in line_lower for back in backup_kw): score = 10
+                        
+                        candidates.append((score, dt))
+                except: pass
+
+        # 英文 MDY (暴力清洗)
         matches_mdy = re.finditer(pat_mdy_clean, clean_line)
         for m in matches_mdy:
             try:
@@ -440,40 +439,72 @@ def extract_dates_v63_4_cti(text):
                 for fmt in ["%b %d %Y", "%B %d %Y"]:
                     try:
                         dt = datetime.strptime(dt_str, fmt)
-                        if is_valid_date(dt): candidates.append((score, dt))
+                        if is_valid_date(dt): 
+                            found_in_line = True
+                            
+                            score = 1
+                            if expect_next_date: score = 100 # 繼承
+                            elif any(bad in line_lower for bad in poison_kw): score = -1000
+                            elif any(good in line_lower for good in bonus_kw): score = 100
+                            elif any(back in line_lower for back in backup_kw): score = 10
+                            
+                            candidates.append((score, dt))
                     except: pass
             except: pass
-
+        
         # YMD 補漏
         clean_line_ymd = clean_line.replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
         clean_line_ymd = " ".join(clean_line_ymd.split())
-        matches = re.finditer(r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(3[01]|[12][0-9]|0?[1-9])", clean_line_ymd)
-        for m in matches:
+        matches_ymd = re.finditer(r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(3[01]|[12][0-9]|0?[1-9])", clean_line_ymd)
+        for m in matches_ymd:
             try:
                 dt_str = " ".join(m.groups())
                 dt = datetime.strptime(dt_str, "%Y %m %d")
-                if is_valid_date(dt): candidates.append((score, dt))
+                if is_valid_date(dt): 
+                    found_in_line = True
+                    score = 1
+                    if expect_next_date: score = 100
+                    elif any(bad in line_lower for bad in poison_kw): score = -1000
+                    elif any(good in line_lower for good in bonus_kw): score = 100
+                    elif any(back in line_lower for back in backup_kw): score = 10
+                    candidates.append((score, dt))
             except: pass
-            
+
+        # 2. 旗標控制 (Context Logic)
+        if found_in_line:
+            expect_next_date = False # 已經找到了，放下旗標
+        else:
+            # 如果這行沒日期，但看起來像是標題 (Date)，且不是壞關鍵字 (Received)
+            # 就舉旗，告訴下一行：「你是日期你就發了」
+            if any(k in line_lower for k in ["date", "日期"]) and not any(bad in line_lower for bad in poison_kw):
+                expect_next_date = True
+            else:
+                # 遇到無關的行，重置旗標 (避免隔太遠誤判)
+                # 這裡可以寬容一點，如果只是空行就不重置，但為了簡單先重置
+                if line.strip(): 
+                    expect_next_date = False
+
     return candidates
 
 def process_cti_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     
-    # 1. 日期提取 (v63.4)
+    # 1. 日期提取 (v63.5)
     text_for_dates = ""
     for p in pdf.pages[:3]: text_for_dates += (p.extract_text() or "") + "\n"
     
-    date_candidates = extract_dates_v63_4_cti(text_for_dates)
+    date_candidates = extract_dates_v63_5_cti(text_for_dates)
     final_dates = []
-    # v63.4: 允許正分候選 (因為 Testing Period 現在是 10 分)
+    
     if date_candidates:
-        valid_only = [d for s, d in date_candidates if s > 0] 
+        # 取分數最高的，如果分數一樣取日期最晚的
+        valid_only = [d for s, d in date_candidates if s > 0]
         if valid_only:
-            latest = max(valid_only) # 即使是 Testing Period，也會選結束日期(較晚的)
-            final_dates.append((100, latest))
+            # 排序：分數高優先(desc)，日期晚優先(desc)
+            best_candidate = sorted(valid_only, key=lambda x: (x[0], x[1]), reverse=True)[0]
+            final_dates.append(best_candidate)
 
-    # 2. 表格解析 (維持 v62.8 鹵素邏輯 - 強力去單位 + 不過濾 Total)
+    # 2. 表格解析 (維持 v62.8 鹵素邏輯)
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
@@ -699,9 +730,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.4", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.4 CTI 日期特赦版)")
-st.info("💡 v63.4：CTI 日期特赦策略 (允許備用 Testing Period)，完美解決 C5191 日期關鍵字分離問題。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.5", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.5 CTI 跨行關聯修復版)")
+st.info("💡 v63.5：CTI 日期引擎升級，啟用跨行上下文感知 (Context Aware)，完美解決 Date 標題與日期斷行的排版問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -723,7 +754,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.4.xlsx",
+            file_name="SGS_CTI_Summary_v63.5.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
