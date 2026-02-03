@@ -234,6 +234,7 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
+            # v60.5 Defenses
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -355,123 +356,80 @@ def process_standard_engine(pdf, filename, company):
                             file_group_data[group_key].append(priority)
                             break
 
-    # Text Rescue (SGS Only)
-    if company == "SGS":
-        missing_targets = []
-        pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
-        halogen_data = []
-        for h in ["F", "CL", "BR", "I"]:
-            halogen_data.extend([d for d in data_pool[h] if d['filename'] == filename])
-        pfos_data = [d for d in data_pool["PFOS"] if d['filename'] == filename]
-        
-        trigger_rescue = False
-        if not pb_data: trigger_rescue = True
-        if ("halogen" in full_text_content.lower() or "卤素" in full_text_content) and not halogen_data:
-            trigger_rescue = True
-        if "pfos" in full_text_content.lower() and not pfos_data:
-            trigger_rescue = True
-
-        if trigger_rescue:
-             parse_text_lines_v60(full_text_content, data_pool, file_group_data, filename, company, targets=None)
-
-    for group_key, values in file_group_data.items():
-        if values:
-            best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
-            data_pool[group_key].append({"priority": best_in_file, "filename": filename})
-
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v63.9: Footer Bonus)
+# 4. CTI 專用引擎 (v63.10: Max Date Priority + Brute Force Cleaning)
 # =============================================================================
 
-def extract_dates_v63_9_cti(text):
+def extract_dates_v63_10_cti(text):
     """
-    v63.9: 頁尾加權 (Footer Bonus) + 主動穿透 (Lookahead)
+    v63.10: 提取 CTI 日期 (包含暴力清洗以抓取 Jan. 8 格式)
     """
     lines = text.split('\n')
-    total_lines = len(lines)
     candidates = []
     
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期", "签发日期"]
     poison_kw = ["approve", "approved", "receive", "received", "receipt", "expiry", "valid", "收样"]
     backup_kw = ["testing period", "test period", "检测周期", "测试周期"]
 
-    # 暴力清洗匹配模式
+    # 暴力清洗匹配模式: 英文月 + 空格 + 日 + 空格 + 年
     pat_mdy_clean = r"([a-zA-Z]{3,})\s+(3[01]|[12][0-9]|0?[1-9])\s+(20\d{2})"
     pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
     pat_dot = r"(20\d{2})\.(0?[1-9]|1[0-2])\.(3[01]|[12][0-9]|0?[1-9])"
 
-    # 輔助函式：從單行文字中提取日期 (返回 list of dates)
-    def parse_dates_from_line(txt):
-        found = []
-        clean_txt = txt.replace(".", " ").replace(",", " ")
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        clean_line = line.replace(".", " ").replace(",", " ") 
+        
+        # 1. 正常提取本行日期
         
         # 中文/點號
         for pat in [pat_chinese, pat_dot]:
-            for m in re.finditer(pat, txt):
+            matches = re.finditer(pat, line)
+            for m in matches:
                 try:
                     dt = datetime.strptime(f"{m.group(1)}-{m.group(2)}-{m.group(3)}", "%Y-%m-%d")
-                    if is_valid_date(dt): found.append(dt)
+                    if is_valid_date(dt): 
+                        score = 1
+                        if any(bad in line_lower for bad in poison_kw): score = -1000
+                        elif any(good in line_lower for good in bonus_kw): score = 100
+                        elif any(back in line_lower for back in backup_kw): score = 10
+                        candidates.append((score, dt))
                 except: pass
-        
+
         # 英文 MDY (暴力清洗)
-        for m in re.finditer(pat_mdy_clean, clean_txt):
+        matches_mdy = re.finditer(pat_mdy_clean, clean_line)
+        for m in matches_mdy:
             try:
                 dt_str = f"{m.group(1)} {m.group(2)} {m.group(3)}"
                 for fmt in ["%b %d %Y", "%B %d %Y"]:
                     try:
                         dt = datetime.strptime(dt_str, fmt)
-                        if is_valid_date(dt): found.append(dt)
+                        if is_valid_date(dt): 
+                            score = 1
+                            if any(bad in line_lower for bad in poison_kw): score = -1000
+                            elif any(good in line_lower for good in bonus_kw): score = 100
+                            elif any(back in line_lower for back in backup_kw): score = 10
+                            candidates.append((score, dt))
                     except: pass
             except: pass
-            
-        # YMD
-        clean_ymd = clean_txt.replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
-        clean_ymd = " ".join(clean_ymd.split())
-        for m in re.finditer(r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(3[01]|[12][0-9]|0?[1-9])", clean_ymd):
+        
+        # YMD 補漏
+        clean_line_ymd = clean_line.replace("-", " ").replace("/", " ").replace("年", " ").replace("月", " ").replace("日", " ")
+        clean_line_ymd = " ".join(clean_line_ymd.split())
+        matches_ymd = re.finditer(r"(20\d{2})\s+(0?[1-9]|1[0-2])\s+(3[01]|[12][0-9]|0?[1-9])", clean_line_ymd)
+        for m in matches_ymd:
             try:
                 dt_str = " ".join(m.groups())
                 dt = datetime.strptime(dt_str, "%Y %m %d")
-                if is_valid_date(dt): found.append(dt)
+                if is_valid_date(dt): 
+                    score = 1
+                    if any(bad in line_lower for bad in poison_kw): score = -1000
+                    elif any(good in line_lower for good in bonus_kw): score = 100
+                    elif any(back in line_lower for back in backup_kw): score = 10
+                    candidates.append((score, dt))
             except: pass
-            
-        return found
-
-    for i, line in enumerate(lines):
-        line_lower = line.lower()
-        
-        # 1. 正常提取本行日期
-        dates_in_line = parse_dates_from_line(line)
-        for dt in dates_in_line:
-            score = 1
-            if any(bad in line_lower for bad in poison_kw): score = -1000
-            elif any(good in line_lower for good in bonus_kw): score = 100
-            elif any(back in line_lower for back in backup_kw): score = 10
-            
-            # v63.9 Footer Bonus: 如果在後半段且不是 Testing Period，加分
-            if i > (total_lines * 0.5) and not any(back in line_lower for back in backup_kw) and score > -100:
-                score += 20
-                
-            candidates.append((score, dt))
-            
-        # 2. Window Search (Lookahead)
-        # 發現 Date 標題，啟動雷達，向下掃描 4 行
-        if any(k in line_lower for k in ["date", "日期"]) and not any(bad in line_lower for bad in poison_kw):
-            for offset in range(1, 5):
-                if i + offset >= len(lines): break
-                
-                next_line = lines[i + offset]
-                next_dates = parse_dates_from_line(next_line)
-                
-                if next_dates:
-                    for dt in next_dates:
-                        # 繼承 100 分，且如果該行在 Footer，一樣給予加分
-                        base_score = 100
-                        if (i + offset) > (total_lines * 0.5): # 檢查實際日期行的位置
-                            base_score += 20
-                        candidates.append((base_score, dt)) 
-                    break 
 
     return candidates
 
@@ -481,14 +439,21 @@ def process_cti_engine(pdf, filename):
     text_for_dates = ""
     for p in pdf.pages[:3]: text_for_dates += (p.extract_text() or "") + "\n"
     
-    date_candidates = extract_dates_v63_9_cti(text_for_dates)
+    date_candidates = extract_dates_v63_10_cti(text_for_dates)
     final_dates = []
     
     if date_candidates:
+        # v63.10 核心: 篩選正分日期，然後取最大(最晚)的日期
+        # 1. 剔除 Received 等負分
         valid_entries = [entry for entry in date_candidates if entry[0] > 0]
+        
         if valid_entries:
-            # 排序：分數高優先(desc)，日期晚優先(desc)
-            best_entry = sorted(valid_entries, key=lambda x: (x[0], x[1]), reverse=True)[0]
+            # 2. 排序規則:
+            # key=lambda x: (x[1], x[0])
+            # 第一優先級: x[1] (日期物件) -> 越晚越大
+            # 第二優先級: x[0] (分數) -> 分數越高越大
+            # reverse=True -> 大的排前面 (最晚日期優先)
+            best_entry = sorted(valid_entries, key=lambda x: (x[1], x[0]), reverse=True)[0]
             final_dates.append(best_entry)
 
     # 2. 表格解析 (維持 v62.8 鹵素邏輯)
@@ -717,9 +682,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.9", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.9 CTI 頁尾加權終極版)")
-st.info("💡 v63.9：CTI 日期引擎引入「頁尾加權機制」，即使關鍵字斷聯，只要日期出現在頁尾，也能擊敗 Testing Period。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.10", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.10 CTI 日期最大化終極版)")
+st.info("💡 v63.10：CTI 日期引擎採用「日期晚者為尊 (Max Date Priority)」策略，無視排版干擾，精準鎖定最終簽發日。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -741,7 +706,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.9.xlsx",
+            file_name="SGS_CTI_Summary_v63.10.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
