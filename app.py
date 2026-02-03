@@ -140,7 +140,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 3. 引擎 A: 標準引擎 (Standard Engine) - v63.18 全方位修復版
+# 3. 引擎 A: 標準引擎 (Standard Engine) - v63.19 升級版
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -208,22 +208,28 @@ def identify_columns_v60(table, company):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            # v63.16 Fix: 加入 "parameter" 識別
             if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt or "parameter" in txt:
                 if item_idx == -1: item_idx = c_idx
             if "mdl" in txt or "loq" in txt:
                 if mdl_idx == -1: mdl_idx = c_idx
             
             if company == "SGS":
-                 # v63.17 Fix: 放寬結果欄 Regex，允許 A.C006 等格式
+                 # v63.19 Fix: 增強 A.C006 格式的 Regex
                  if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt) or 
-                    re.search(r"^[a-z]?\s*\.?\s*[a-z]?\d+", txt) or "no." in txt):
+                    re.search(r"^[a-z]?\s*\.?\s*[a-z]?\d+", txt) or re.search(r"[a-z]\s*\.\s*[a-z]\d+", txt) or "no." in txt):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
                         if result_idx == -1: result_idx = c_idx
             else:
                 if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
                     if result_idx == -1: result_idx = c_idx
     
+    # MDL 燈塔戰術
+    if result_idx == -1 and company == "SGS":
+        if mdl_idx != -1 and mdl_idx > 0:
+            result_idx = mdl_idx - 1
+        elif mdl_idx != -1 and mdl_idx + 1 < len(table[0]):
+            result_idx = mdl_idx + 1
+
     is_reference_table = False
     if is_msds_table: is_reference_table = True
     elif result_idx == -1:
@@ -234,7 +240,7 @@ def identify_columns_v60(table, company):
         if item_idx == -1:
             is_reference_table = True
 
-    return item_idx, result_idx, is_reference_table, mdl_idx # v63.18: 回傳 mdl_idx
+    return item_idx, result_idx, is_reference_table, mdl_idx
 
 def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, targets=None):
     lines = text.split('\n')
@@ -248,9 +254,7 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # v63.14 Fix: 新增 "indeno" 到 Cd 的防禦列表
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue 
-            
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
             if key == "Pb" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
@@ -318,14 +322,11 @@ def process_standard_engine(pdf, filename, company):
         tables = page.extract_tables()
         for table in tables:
             if not table or len(table) < 2: continue
-            # v63.18 Fix: 接收 mdl_idx
             item_idx, result_idx, is_skip, mdl_idx = identify_columns_v60(table, company)
             if is_skip: continue
             
-            # v63.18 Fix: 智慧欄位偵測 (Smart Column Detection)
-            # 當找不到 Result 標題時，利用 MDL 進行左右掃描
+            # v63.19 Fix: 智慧欄位偵測 (Smart Column Detection)
             if result_idx == -1 and company == "SGS" and mdl_idx != -1:
-                # 檢查左邊 (MDL-1)
                 left_idx = mdl_idx - 1
                 left_score = 0
                 if left_idx >= 0:
@@ -334,7 +335,6 @@ def process_standard_engine(pdf, filename, company):
                         if "n.d." in val or re.search(r"\d", val): left_score += 1
                         if "unit" in val or "mg/kg" in val or "method" in val: left_score -= 5
                 
-                # 檢查右邊 (MDL+1)
                 right_idx = mdl_idx + 1
                 right_score = 0
                 if right_idx < len(table[0]):
@@ -354,9 +354,8 @@ def process_standard_engine(pdf, filename, company):
                 
                 rows_to_process = []
                 
-                # v63.18 Fix: 強力拆行清洗 (Aggressive Filtering)
+                # v63.19 Fix: 強力拆行清洗
                 if "\n" in raw_item_cell:
-                    # 拆解並過濾空字串
                     split_items = [x.strip() for x in raw_item_cell.split('\n') if x.strip()]
                     
                     if "\n" in raw_result_cell:
@@ -364,28 +363,23 @@ def process_standard_engine(pdf, filename, company):
                     else:
                         split_results = [raw_result_cell.strip()] if raw_result_cell.strip() else []
 
-                    # 邏輯匹配
                     if len(split_items) > 1 and len(split_results) == 1:
-                        # 一對多 (共用結果)
                         for si in split_items:
                             virtual_row = list(row)
                             virtual_row[item_idx] = si
                             if result_idx != -1: virtual_row[result_idx] = split_results[0]
                             rows_to_process.append(virtual_row)
                     elif len(split_items) == len(split_results):
-                        # 一對一
                         for si, sr in zip(split_items, split_results):
                             virtual_row = list(row)
                             virtual_row[item_idx] = si
                             if result_idx != -1: virtual_row[result_idx] = sr
                             rows_to_process.append(virtual_row)
                     else:
-                        # 無法完美匹配，退回原行處理
                         rows_to_process.append(row)
                 else:
                     rows_to_process.append(row)
 
-                # 開始處理
                 for proc_row in rows_to_process:
                     clean_row = [clean_text(cell) for cell in proc_row]
                     row_txt = "".join(clean_row).lower()
@@ -430,7 +424,6 @@ def process_standard_engine(pdf, filename, company):
                             if kw.lower() in item_name_lower:
                                 if target_key == "PFOS" and "related" in item_name_lower: continue 
                                 data_pool[target_key].append({"priority": priority, "filename": filename})
-                                # v63.17/18 Fix: 移除 break
                     
                     for group_key, keywords in GROUP_KEYWORDS.items():
                         for kw in keywords:
@@ -438,7 +431,6 @@ def process_standard_engine(pdf, filename, company):
                                 file_group_data[group_key].append(priority)
                                 break
 
-    # Text Rescue (SGS Only)
     if company == "SGS":
         missing_targets = []
         pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
@@ -469,66 +461,43 @@ def process_standard_engine(pdf, filename, company):
 # =============================================================================
 
 def extract_dates_v63_13_global(text):
-    """
-    v63.13: 全域串流分析 (Global Token Stream)
-    將前3頁文字合併為一個大字串，進行分詞掃描，徹底解決跨行問題。
-    """
     candidates = []
-    
-    # 毒藥關鍵字
     poison_kw = ["received", "receive", "expiry", "valid", "process"]
-    # 備胎關鍵字 (Testing Period)
     backup_kw = ["testing", "period", "test"]
     
-    # 1. 強力清洗與分詞
-    # 替換所有標點符號為空格，轉小寫
-    clean_text = re.sub(r'[^a-z0-9]', ' ', text.lower())
-    tokens = clean_text.split()
+    clean_text_str = re.sub(r'[^a-z0-9]', ' ', text.lower())
+    tokens = clean_text_str.split()
     
-    # 2. 滑動視窗掃描 (Sliding Window)
     for i in range(len(tokens) - 2):
         t1, t2, t3 = tokens[i], tokens[i+1], tokens[i+2]
         dt = None
         
         try:
-            # 模式 A: MDY (mar 15 2022)
             if t1 in MONTH_MAP and t2.isdigit() and t3.isdigit() and len(t3) == 4:
                 m, d, y = MONTH_MAP[t1], int(t2), int(t3)
                 dt = datetime(y, m, d)
-            
-            # 模式 B: DMY (15 mar 2022)
             elif t1.isdigit() and t2 in MONTH_MAP and t3.isdigit() and len(t3) == 4:
                 d, m, y = int(t1), MONTH_MAP[t2], int(t3)
                 dt = datetime(y, m, d)
-                
-            # 模式 C: YMD (2022 03 15)
             elif t1.isdigit() and len(t1) == 4 and t2.isdigit() and t3.isdigit():
                 y, m, d = int(t1), int(t2), int(t3)
                 dt = datetime(y, m, d)
                 
             if dt and is_valid_date(dt):
-                # 3. 毒藥回溯 (Poison Backtrack)
-                # 檢查前 10 個 token 是否有毒藥
                 start_lookback = max(0, i - 10)
                 context_window = tokens[start_lookback : i]
-                
-                score = 100 # 預設滿分 (假設是孤兒/簽名檔日期)
-                
+                score = 100 
                 if any(p in context_window for p in poison_kw):
-                    score = -1000 # 毒藥 (Received Date)
+                    score = -1000 
                 elif any(b in context_window for b in backup_kw):
-                    score = 10 # 備胎 (Testing Period)
-                
+                    score = 10 
                 candidates.append((score, dt))
-                
         except: pass
-        
     return candidates
 
 def process_cti_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     
-    # 1. 日期抓取 (v63.13 邏輯 - 保持不變)
     text_for_dates = ""
     for p in pdf.pages[:3]: 
         text_for_dates += (p.extract_text() or "") + " " 
@@ -542,18 +511,15 @@ def process_cti_engine(pdf, filename):
             best_entry = sorted(valid_entries, key=lambda x: (x[1], x[0]), reverse=True)[0]
             final_dates.append(best_entry)
 
-    # 2. 表格解析 (v63.15 更新: 多欄位聚合)
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
             if not table or len(table) < 2: continue
             
-            # 定位錨點
             item_col_idx = -1
             mdl_col_idx = -1
             cols = len(table[0])
             
-            # A. 找 MDL (右邊界)
             for c in range(cols):
                 num_count = 0
                 row_count = 0
@@ -566,44 +532,33 @@ def process_cti_engine(pdf, filename):
                     mdl_col_idx = c
                     break
             
-            # B. 找 Test Item (左邊界)
             for c in range(cols):
                 header = str(table[0][c]).lower()
                 if "item" in header or "項目" in header or "项目" in header:
                     item_col_idx = c
                     break
-            if item_col_idx == -1: item_col_idx = 0 # 預設第0欄
+            if item_col_idx == -1: item_col_idx = 0 
             
-            if mdl_col_idx == -1: continue # 找不到 MDL，放棄此表
+            if mdl_col_idx == -1: continue 
             
-            # C. 確定結果欄位範圍 (Item右邊 ~ MDL左邊)
             result_col_indices = [c for c in range(item_col_idx + 1, mdl_col_idx)]
             if not result_col_indices:
-                # 如果中間沒有欄位 (例如 | Item | MDL |)，可能格式不標準，嘗試 MDL 前一欄
                 if mdl_col_idx > 0: result_col_indices = [mdl_col_idx - 1]
             
-            # D. 遍歷每一列，聚合數據
             for row in table:
                 if len(row) <= mdl_col_idx: continue
-                
                 item_text = clean_text(row[item_col_idx]).lower()
-                
-                # 收集該列所有結果欄的數據
                 row_candidates = []
                 for c_idx in result_col_indices:
                     if c_idx < len(row):
                         val_str = str(row[c_idx])
                         prio = parse_value_priority(val_str)
-                        if prio[0] > 0: # 0=無效, 1=ND, 2=Neg, 3=Num
+                        if prio[0] > 0: 
                             row_candidates.append(prio)
                 
                 if not row_candidates: continue
-                
-                # E. 聚合邏輯: 取優先級最高、數值最大的
-                # 排序: (Priority Desc, Value Desc) -> (3, 97) > (3, 50) > (2, 0) > (1, 0)
                 best_prio = sorted(row_candidates, key=lambda x: (x[0], x[1]), reverse=True)[0]
                 
-                # F. 關鍵字匹配與存儲
                 for key, kws in SIMPLE_KEYWORDS.items():
                     if key == "Cd" and any(bad in item_text for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
                     if key == "F" and any(bad in item_text for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
@@ -622,103 +577,141 @@ def process_cti_engine(pdf, filename):
     return data_pool, final_dates
 
 # =============================================================================
-# 5. 馬來西亞專用引擎 (v61.1 邏輯)
+# 5. 馬來西亞專用引擎 (v63.19: 全面移植標準引擎邏輯)
 # =============================================================================
-
-def extract_date_malaysia(text):
-    lines = text.split('\n')
-    for line in lines:
-        if "REPORTED DATE" in line.upper():
-            if "JOB REF" in line.upper(): continue
-            pat = r"(0?[1-9]|[12][0-9]|3[01])[\s-]([a-zA-Z]{3,})[\s-](20\d{2})"
-            match = re.search(pat, line)
-            if match:
-                dt_str = f"{match.group(1)} {match.group(2)} {match.group(3)}"
-                for fmt in ["%d %B %Y", "%d %b %Y"]:
-                    try:
-                        return datetime.strptime(dt_str, fmt)
-                    except: pass
-    return None
 
 def process_malaysia_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
-    full_text = ""
-    for p in pdf.pages: full_text += (p.extract_text() or "") + "\n"
     
-    dt = extract_date_malaysia(full_text)
-    date_candidates = []
-    if dt: date_candidates.append((100, dt))
+    # 1. 移植 v63.13 全域串流日期分析
+    text_for_dates = ""
+    for p in pdf.pages[:3]: 
+        text_for_dates += (p.extract_text() or "") + " " 
+    
+    date_candidates = extract_dates_v63_13_global(text_for_dates)
+    
+    # 2. 移植 v63.19 標準引擎表格邏輯
+    company = "SGS" # 強制設定為 SGS 以啟用相關邏輯
+    file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
 
-    # RoHS2 (Table Anchor)
     for page in pdf.pages:
         tables = page.extract_tables()
         for table in tables:
             if not table or len(table) < 2: continue
-            mdl_col = -1
-            cols = len(table[0])
-            for c in range(cols):
-                num_cnt = 0
-                row_cnt = 0
-                for r in range(1, len(table)):
-                    val = clean_text(table[r][c])
-                    if not val: continue
-                    row_cnt += 1
-                    if val in ["2", "5", "8", "10", "50"]: num_cnt += 1
-                if row_cnt > 0 and (num_cnt / row_cnt) >= 0.5:
-                    mdl_col = c
-                    break
             
-            if mdl_col > 0:
-                result_col = mdl_col - 1
-                for row in table:
-                    if len(row) <= mdl_col: continue
-                    item_text = " ".join([str(x) for x in row[:result_col] if x]).lower()
-                    raw_res = str(row[result_col])
-                    final_val = None
-                    if re.search(r"(?i)(\bN\.?D\.?|\bNot Detected|\bNegative)", raw_res):
-                        final_val = "N.D."
+            # 使用增強版的 identify_columns_v60
+            item_idx, result_idx, is_skip, mdl_idx = identify_columns_v60(table, company)
+            if is_skip: continue
+            
+            # 移植智慧欄位偵測
+            if result_idx == -1 and mdl_idx != -1:
+                left_idx = mdl_idx - 1
+                left_score = 0
+                if left_idx >= 0:
+                    for r in range(1, min(5, len(table))):
+                        val = clean_text(table[r][left_idx]).lower()
+                        if "n.d." in val or re.search(r"\d", val): left_score += 1
+                        if "unit" in val or "mg/kg" in val or "method" in val: left_score -= 5
+                
+                right_idx = mdl_idx + 1
+                right_score = 0
+                if right_idx < len(table[0]):
+                    for r in range(1, min(5, len(table))):
+                        val = clean_text(table[r][right_idx]).lower()
+                        if "n.d." in val or re.search(r"\d", val): right_score += 1
+                        if "unit" in val or "mg/kg" in val or "method" in val: right_score -= 5
+                
+                if right_score > left_score and right_score > 0:
+                    result_idx = right_idx
+                elif left_score > 0:
+                    result_idx = left_idx
+
+            for row in table:
+                raw_item_cell = str(row[item_idx]) if item_idx < len(row) and row[item_idx] else ""
+                raw_result_cell = str(row[result_idx]) if result_idx != -1 and result_idx < len(row) and row[result_idx] else ""
+                
+                rows_to_process = []
+                
+                # 移植強力拆行清洗
+                if "\n" in raw_item_cell:
+                    split_items = [x.strip() for x in raw_item_cell.split('\n') if x.strip()]
+                    if "\n" in raw_result_cell:
+                        split_results = [x.strip() for x in raw_result_cell.split('\n') if x.strip()]
                     else:
-                        nums = re.findall(r"\d+(?:\.\d+)?", raw_res)
-                        for num in nums:
-                            if num in ["62321", "2013", "2015", "2017", "2020"]: continue
-                            final_val = num
-                            break
-                    
-                    if not final_val: continue
-                    priority = (10, 0, final_val) 
+                        split_results = [raw_result_cell.strip()] if raw_result_cell.strip() else []
 
-                    for key, kws in SIMPLE_KEYWORDS.items():
-                        if any(kw.lower() in item_text for kw in kws):
-                            if key == "Cd" and "hexabromocyclododecane" in item_text: continue
-                            data_pool[key].append({"priority": priority, "filename": filename})
-                            break
-                    for key, kws in GROUP_KEYWORDS.items():
-                        if any(kw.lower() in item_text for kw in kws):
-                            data_pool[key].append({"priority": priority, "filename": filename})
-                            break
-
-    # HF (Block Search)
-    ft_lower = full_text.lower()
-    targets = {"F": "fluorine", "CL": "chlorine", "BR": "bromine", "I": "iodine"}
-    for key, kw in targets.items():
-        if not data_pool[key]:
-            idx = ft_lower.find(kw)
-            if idx != -1:
-                window = ft_lower[idx:idx+300]
-                if "n.d." in window:
-                    data_pool[key].append({"priority": (10, 0, "N.D."), "filename": filename})
+                    if len(split_items) > 1 and len(split_results) == 1:
+                        for si in split_items:
+                            virtual_row = list(row)
+                            virtual_row[item_idx] = si
+                            if result_idx != -1: virtual_row[result_idx] = split_results[0]
+                            rows_to_process.append(virtual_row)
+                    elif len(split_items) == len(split_results):
+                        for si, sr in zip(split_items, split_results):
+                            virtual_row = list(row)
+                            virtual_row[item_idx] = si
+                            if result_idx != -1: virtual_row[result_idx] = sr
+                            rows_to_process.append(virtual_row)
+                    else:
+                        rows_to_process.append(row)
                 else:
-                    nums = re.findall(r"\b\d+\b", window)
-                    found_num = ""
-                    for n in nums:
-                        if n == "50": continue
-                        if len(n) == 1: continue
-                        if n[:4] in ["2020", "2021", "2024", "2025"]: continue
-                        if n == "62321": continue
-                        found_num = n
-                        break
-                    if found_num:
-                        data_pool[key].append({"priority": (5, float(found_num), found_num), "filename": filename})
+                    rows_to_process.append(row)
+
+                for proc_row in rows_to_process:
+                    clean_row = [clean_text(cell) for cell in proc_row]
+                    row_txt = "".join(clean_row).lower()
+                    if "test item" in row_txt or "result" in row_txt: continue
+                    if not any(clean_row): continue
+                    
+                    target_item_col = item_idx if item_idx != -1 else 0
+                    if target_item_col >= len(clean_row): continue
+                    item_name = clean_row[target_item_col]
+                    item_name_lower = item_name.lower()
+                    
+                    if "pvc" in item_name_lower: continue
+
+                    result = ""
+                    if result_idx != -1 and result_idx < len(clean_row):
+                        result = clean_row[result_idx]
+                    
+                    temp_priority = parse_value_priority(result)
+                    if temp_priority[0] == 0:
+                        for cell in reversed(clean_row):
+                            c_lower = cell.lower()
+                            if not cell: continue
+                            if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
+                                result = cell
+                                break
+                            if re.search(r"^\d+(\.\d+)?", cell):
+                                if is_suspicious_limit_value(cell): continue
+                                result = cell
+                                break
+                    
+                    priority = parse_value_priority(result)
+                    if priority[0] == 0: continue
+
+                    for target_key, keywords in SIMPLE_KEYWORDS.items():
+                        if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
+                        if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
+                        if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
+                        if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
+
+                        for kw in keywords:
+                            if kw.lower() in item_name_lower:
+                                if target_key == "PFOS" and "related" in item_name_lower: continue 
+                                data_pool[target_key].append({"priority": priority, "filename": filename})
+                                break
+                    
+                    for group_key, keywords in GROUP_KEYWORDS.items():
+                        for kw in keywords:
+                            if kw.lower() in item_name_lower:
+                                file_group_data[group_key].append(priority)
+                                break
+
+    for group_key, values in file_group_data.items():
+        if values:
+            best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
+            data_pool[group_key].append({"priority": best_in_file, "filename": filename})
 
     return data_pool, date_candidates
 
@@ -736,6 +729,7 @@ def process_files(files):
                 first_page_text = (pdf.pages[0].extract_text() or "").upper()
                 company = identify_company(first_page_text)
                 
+                # 分流邏輯：SGS 馬來西亞 vs SGS 標準 vs CTI
                 if "MALAYSIA" in first_page_text and "SGS" in first_page_text:
                     data_pool, date_candidates = process_malaysia_engine(pdf, file.name)
                 elif company == "CTI":
@@ -782,9 +776,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.18", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.18 SGS 智慧定位與強力清洗版)")
-st.info("💡 v63.18：針對 SGS 變種格式引入「智慧欄位偵測 (Smart Column Detection)」與「強力拆行清洗」，解決 Result 定位失敗與 HF 空值干擾問題。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.19", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.19 引擎全面升級版)")
+st.info("💡 v63.19：將標準引擎的強大功能（智慧欄位、強力拆行、全域日期）全面移植至馬來西亞引擎，並強化 A.C006 格式支援，徹底解決 HF/RoHS2/CMR 三大難題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -806,7 +800,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.18.xlsx",
+            file_name="SGS_CTI_Summary_v63.19.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
