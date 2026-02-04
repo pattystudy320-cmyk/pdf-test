@@ -110,7 +110,7 @@ def is_valid_date(dt):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
-        # v63.35 Fix: 加入小數點 MDL 黑名單，防止 SGS 誤抓 0.003
+        # v63.35 Fix: SGS 0.003 MDL 排除
         if n in [1000.0, 100.0, 50.0, 25.0, 10.0, 5.0, 2.0, 0.003, 0.005, 0.01, 0.05, 0.050, 0.0005]: return True
         return False
     except: return False
@@ -145,7 +145,7 @@ def parse_value_priority(value_str):
     return (0, 0, val)
 
 def format_output_value(val):
-    """v63.35: 格式化輸出，如果是整數 float 則轉 int，否則保留"""
+    """v63.35: 格式化輸出，去除 .0"""
     try:
         f = float(val)
         if f.is_integer():
@@ -163,7 +163,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 4. [Core 2] SGS 馬來西亞專用引擎 (v63.28 邏輯 - 保持不動)
+# 4. [Core 2] SGS 馬來西亞專用引擎 (v63.28 邏輯)
 # =============================================================================
 
 def extract_date_malaysia_v7(text):
@@ -254,13 +254,17 @@ def process_malaysia_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 5. [Core 1] CTI 專用引擎 (v63.35 修正: Max Rule + TBBP防呆)
+# 5. [Core 1] CTI 專用引擎 (v63.36 修正: 日期權重 + BR 豁免 + Max Rule)
 # =============================================================================
 
 def extract_dates_v63_13_global(text):
     candidates = []
-    poison_kw = ["received", "receive", "expiry", "valid", "process"]
+    # [v63.36 Fix] 日期權重毒藥
+    poison_kw = ["received", "receive", "expiry", "valid", "process", "testing period", "检测日期", "接收日期"]
     backup_kw = ["testing", "period", "test"]
+    # [v63.36 Fix] 日期權重加分
+    bonus_kw = ["report date", "date:", "日期:", "report no"]
+    
     clean_text_str = re.sub(r'[^a-z0-9]', ' ', text.lower())
     tokens = clean_text_str.split()
     for i in range(len(tokens) - 2):
@@ -280,8 +284,10 @@ def extract_dates_v63_13_global(text):
                 start_lookback = max(0, i - 10)
                 context_window = tokens[start_lookback : i]
                 score = 100 
-                if any(p in context_window for p in poison_kw): score = -1000 
-                elif any(b in context_window for b in backup_kw): score = 10 
+                # [v63.36 Fix] 應用權重
+                if any(p in context_window for p in poison_kw): score -= 1000 
+                elif any(b in context_window for b in bonus_kw): score += 500
+                elif any(b in context_window for b in backup_kw): score += 10 
                 candidates.append((score, dt))
         except: pass
     return candidates
@@ -302,7 +308,6 @@ def process_cti_engine(pdf, filename):
             item_col_idx = -1
             cols = len(table[0])
             
-            # 1. 尋找 MDL 欄位
             for c in range(cols):
                 header = clean_text(table[0][c]).lower()
                 if "mdl" in header or "loq" in header:
@@ -324,7 +329,6 @@ def process_cti_engine(pdf, filename):
             
             if mdl_col_idx == -1: continue 
 
-            # 2. 尋找 Item 欄位
             for c in range(cols):
                 header = str(table[0][c]).lower()
                 if "item" in header or "項目" in header or "项目" in header:
@@ -332,7 +336,6 @@ def process_cti_engine(pdf, filename):
                     break
             if item_col_idx == -1: item_col_idx = 0
 
-            # 3. 多樣品欄位掃描 (Item ~ MDL)
             data_col_indices = []
             for c in range(item_col_idx + 1, mdl_col_idx):
                 data_col_indices.append(c)
@@ -340,7 +343,6 @@ def process_cti_engine(pdf, filename):
             if not data_col_indices:
                 data_col_indices = [mdl_col_idx - 1]
 
-            # 4. 逐行掃描
             for row in table:
                 if len(row) <= mdl_col_idx: continue
                 item_text = clean_text(row[item_col_idx]).lower()
@@ -348,7 +350,6 @@ def process_cti_engine(pdf, filename):
                 # [v63.35 Fix] TBBP-A 防呆
                 if "tbbp" in item_text or "tetrabromo" in item_text: continue
 
-                # [v63.35 Fix] 多樣品 Max Rule 邏輯
                 valid_numbers = []
                 has_negative = False
                 has_nd = False
@@ -366,7 +367,7 @@ def process_cti_engine(pdf, filename):
                 
                 final_prio = (0, 0, "")
                 if valid_numbers:
-                    max_val = max(valid_numbers) # 取最大值
+                    max_val = max(valid_numbers) # Max Rule
                     final_prio = (3, max_val, str(max_val))
                 elif has_negative:
                     final_prio = (2, 0, "NEGATIVE")
@@ -375,8 +376,17 @@ def process_cti_engine(pdf, filename):
                 
                 if final_prio[0] == 0: continue
 
-                # 關鍵字匹配 (無過濾)
                 for key, kws in SIMPLE_KEYWORDS.items():
+                    # [v63.36 Fix] BR 豁免條款：如果是 Halogen/Bromine，允許存在 "poly"
+                    if key == "BR" and ("halogen" in item_text or "bromine" in item_text):
+                        pass # Skip standard filters for BR
+                    else:
+                        if key == "Cd" and any(bad in item_text for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
+                        if key == "F" and any(bad in item_text for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
+                        # [Standard BR filter]
+                        if key == "BR" and any(bad in item_text for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
+                        if key == "Pb" and any(bad in item_text for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
+
                     if any(kw.lower() in item_text for kw in kws):
                         data_pool[key].append({"priority": final_prio, "filename": filename})
                         break
@@ -389,14 +399,15 @@ def process_cti_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 6. [Core 1] SGS 標準引擎 (v63.35 修正: TBBP防呆 + 0.003防呆)
+# 6. [Core 1] SGS 標準引擎 (v63.36 修正: 總和行特赦 + 日期權重)
 # =============================================================================
 
 def extract_dates_v60(text):
     lines = text.split('\n')
     candidates = []
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期"]
-    poison_kw = ["approve", "approved", "receive", "received", "receipt", "period", "expiry", "valid"]
+    # [v63.36 Fix] 日期毒藥
+    poison_kw = ["approve", "approved", "receive", "received", "receipt", "period", "expiry", "valid", "testing period", "检测日期"]
     pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
     pat_ymd = r"(20\d{2})[\.\/-](0?[1-9]|1[0-2])[\.\/-](3[01]|[12][0-9]|0?[1-9])"
     pat_dmy = r"(3[01]|[12][0-9]|0?[1-9])\s+([a-zA-Z]{3,})\s+(20\d{2})"
@@ -485,10 +496,15 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
             # [v63.35 Fix] TBBP 防呆
             if key == "BBP" and ("tbbp" in line_lower or "tetrabromo" in line_lower): continue
 
-            if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue 
-            if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
-            if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
-            if key == "Pb" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
+            # [v63.36 Fix] BR 豁免
+            if key == "BR" and ("halogen" in line_lower or "bromine" in line_lower):
+                pass
+            else:
+                if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue 
+                if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
+                if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
+                if key == "Pb" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
+            
             for kw in keywords:
                 if kw.lower() in line_lower and "test item" not in line_lower:
                     matched_simple = key
@@ -649,7 +665,16 @@ def process_standard_engine(pdf, filename, company):
                                 result = cell
                                 break
 
-                    # MDL 數值排除法
+                    # [v63.36 Fix] 總和行特赦 (即使 MDL 為空也允許抓取)
+                    is_sum_row = "sum of" in item_name_lower or "之和" in item_name_lower
+                    if is_sum_row and result == "":
+                         for cell in reversed(clean_row):
+                            c_lower = cell.lower()
+                            if "nd" in c_lower or "n.d." in c_lower:
+                                result = cell
+                                break
+
+                    # [v63.34] MDL 數值排除法
                     if mdl_idx != -1 and mdl_idx < len(clean_row):
                         mdl_val = clean_text(clean_row[mdl_idx])
                         if result == mdl_val and result != "":
@@ -672,12 +697,13 @@ def process_standard_engine(pdf, filename, company):
                     if priority[0] == 0: continue
 
                     for target_key, keywords in SIMPLE_KEYWORDS.items():
-                        # [v63.35 Fix] TBBP 防呆
-                        if target_key == "BBP" and ("tbbp" in item_name_lower or "tetrabromo" in item_name_lower): continue
-
                         if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
                         if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
-                        if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
+                        # [v63.36 Fix] BR 豁免
+                        if target_key == "BR" and ("halogen" in item_name_lower or "bromine" in item_name_lower):
+                            pass
+                        else:
+                            if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
                         if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
 
                         for kw in keywords:
@@ -738,10 +764,10 @@ def process_files(files):
                     # 通道 A: 馬來西亞 (v63.28 核心 - 文字掃描)
                     data_pool, date_candidates = process_malaysia_engine(pdf, file.name)
                 elif company == "CTI":
-                    # 通道 B: CTI (v63.35 - Max Rule + TBBP防呆)
+                    # 通道 B: CTI (v63.36 - 日期權重 + BR豁免)
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
                 else:
-                    # 通道 C: 標準 SGS (v63.35 - 0.003排除 + TBBP防呆)
+                    # 通道 C: 標準 SGS (v63.36 - 總和行特赦)
                     data_pool, date_candidates = process_standard_engine(pdf, file.name, company)
                 
                 final_row = {}
@@ -758,9 +784,7 @@ def process_files(files):
                     if k in ["日期", "檔案名稱"]: continue
                     candidates = data_pool.get(k, [])
                     if candidates:
-                        # 排序優先級 (3:Num, 2:Neg, 1:ND)
                         best = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
-                        # 數值格式化 (v63.35: 去除 .0)
                         final_row[k] = format_output_value(best['priority'][2])
                     else:
                         final_row[k] = ""
@@ -784,9 +808,9 @@ def find_report_start_page(pdf):
 # 8. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.35", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.35 雙核心．數值修正終極版)")
-st.info("💡 v63.35：修正 CTI 多樣品加總邏輯為「取最大值」、排除 CTI 誤抓 TBBP-A、排除 SGS 誤抓 0.003 MDL，並優化輸出格式（去除 .0）。馬來西亞引擎保持獨立運作。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.36", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.36 微創修正版)")
+st.info("💡 v63.36：\n1. CTI 日期抓取修正（權重邏輯，排除 Testing Period）。\n2. CTI 溴 (BR) 誤殺修正（放寬過濾）。\n3. SGS 簡體版 PBB 總和修正（允許空 MDL）。\n4. 核心架構維持不變。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -794,23 +818,3 @@ if uploaded_files:
     if st.button("🔄 重新執行"): st.rerun()
 
     try:
-        result_data = process_files(uploaded_files)
-        df = pd.DataFrame(result_data)
-        df = df.reindex(columns=OUTPUT_COLUMNS)
-
-        st.success("✅ 處理完成！")
-        st.dataframe(df)
-
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Summary')
-        
-        st.download_button(
-            label="📥 下載 Excel",
-            data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.35.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        
-    except Exception as e:
-        st.error(f"系統錯誤: {e}")
