@@ -16,7 +16,7 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
-# 恢復 v63.15 的設定：包含 PFOS 短字串，且不設排除邏輯
+# v63.34: 保持 v63.15 設定，PFOS 包含短關鍵字
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "鉛", "Pb"],
     "Cd": ["Cadmium", "鎘", "Cd"],
@@ -33,7 +33,7 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "lodine"]
 }
 
-# 恢復 v63.15 的設定：包含所有單項 PBB/PBDE，確保 CTI 能識別
+# v63.34: 保持 v63.15 設定，PBB/PBDE 包含所有單項
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和", "多溴聯苯之和",
@@ -152,7 +152,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 4. [Core 2] SGS 馬來西亞專用引擎 (v63.28 邏輯)
+# 4. [Core 2] SGS 馬來西亞專用引擎 (v63.28 邏輯 - 保持不動)
 # =============================================================================
 
 def extract_date_malaysia_v7(text):
@@ -228,9 +228,7 @@ def process_malaysia_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     full_text = ""
     for p in pdf.pages: full_text += (p.extract_text() or "") + "\n"
-    
     report_date = extract_date_malaysia_v7(pdf.pages[0].extract_text() or "")
-    
     for col_key in OUTPUT_COLUMNS:
         if col_key in ["日期", "檔案名稱"]: continue
         keyword = MY_ITEM_RULES.get(col_key)
@@ -240,13 +238,12 @@ def process_malaysia_engine(pdf, filename):
             prio = parse_value_priority(val)
             if prio[0] > 0:
                 data_pool[col_key].append({"priority": prio, "filename": filename})
-
     date_candidates = []
     if report_date: date_candidates.append((100, report_date))
     return data_pool, date_candidates
 
 # =============================================================================
-# 5. [Core 1] CTI 專用引擎 (v63.15 復刻: MDL 錨點法 + 無過濾)
+# 5. [Core 1] CTI 專用引擎 (v63.15 復刻: MDL錨點 + 多欄加總)
 # =============================================================================
 
 def extract_dates_v63_13_global(text):
@@ -290,8 +287,7 @@ def process_cti_engine(pdf, filename):
         for table in tables:
             if not table or len(table) < 2: continue
             
-            # v63.15 核心邏輯：MDL 錨點定位法
-            # 這能解決 BBP 抓到 Limit (1000) 的問題
+            # v63.15 復刻：MDL 錨點定位法
             mdl_col_idx = -1
             item_col_idx = -1
             cols = len(table[0])
@@ -303,7 +299,7 @@ def process_cti_engine(pdf, filename):
                     mdl_col_idx = c
                     break
             
-            # 若無表頭，用內容特徵判斷 (CTI 常見 MDL 數值)
+            # 若無表頭，用內容特徵判斷
             if mdl_col_idx == -1:
                 for c in range(cols):
                     num_count = 0
@@ -319,11 +315,7 @@ def process_cti_engine(pdf, filename):
             
             if mdl_col_idx == -1: continue 
 
-            # 2. 結果欄位 (MDL 左邊)
-            result_col_idx = mdl_col_idx - 1
-            if result_col_idx < 0: continue
-
-            # 3. 項目欄位
+            # 2. 尋找 Item 欄位
             for c in range(cols):
                 header = str(table[0][c]).lower()
                 if "item" in header or "項目" in header or "项目" in header:
@@ -331,31 +323,60 @@ def process_cti_engine(pdf, filename):
                     break
             if item_col_idx == -1: item_col_idx = 0
 
-            # 4. 掃描
+            # 3. [v63.34 關鍵修正] 多樣品欄位加總邏輯
+            # 掃描 Item 欄與 MDL 欄之間的所有欄位
+            data_col_indices = []
+            for c in range(item_col_idx + 1, mdl_col_idx):
+                data_col_indices.append(c)
+            
+            # 若中間沒欄位，則退回到只取 MDL 左邊那欄
+            if not data_col_indices:
+                data_col_indices = [mdl_col_idx - 1]
+
+            # 4. 逐行掃描
             for row in table:
                 if len(row) <= mdl_col_idx: continue
                 item_text = clean_text(row[item_col_idx]).lower()
                 
-                # 直接取錨點欄位的內容，解決 BBP 抓錯問題
-                raw_result = clean_text(row[result_col_idx])
-                prio = parse_value_priority(raw_result)
-                if prio[0] == 0: continue
+                # 加總所有樣品數據
+                total_value = 0.0
+                detected_count = 0
+                has_nd = False
+                
+                for c_idx in data_col_indices:
+                    if c_idx < len(row):
+                        raw_val = clean_text(row[c_idx])
+                        prio = parse_value_priority(raw_val)
+                        # prio: (score, number, string)
+                        if prio[0] == 3: # 數值
+                            total_value += prio[1]
+                            detected_count += 1
+                        elif prio[0] == 1: # N.D.
+                            has_nd = True
+                
+                final_prio = (0, 0, "")
+                if detected_count > 0:
+                    final_prio = (3, total_value, str(total_value))
+                elif has_nd:
+                    final_prio = (1, 0, "N.D.")
+                
+                if final_prio[0] == 0: continue
 
-                # 關鍵字匹配 (v63.15 無過濾風格，解決 PFOS 漏抓)
+                # 關鍵字匹配 (無過濾)
                 for key, kws in SIMPLE_KEYWORDS.items():
                     if any(kw.lower() in item_text for kw in kws):
-                        data_pool[key].append({"priority": prio, "filename": filename})
+                        data_pool[key].append({"priority": final_prio, "filename": filename})
                         break
                 
                 for key, kws in GROUP_KEYWORDS.items():
                     if any(kw.lower() in item_text for kw in kws):
-                        data_pool[key].append({"priority": prio, "filename": filename})
+                        data_pool[key].append({"priority": final_prio, "filename": filename})
                         break
 
     return data_pool, date_candidates
 
 # =============================================================================
-# 6. [Core 1] SGS 標準引擎 (v63.15 + v63.24 混合)
+# 6. [Core 1] SGS 標準引擎 (v63.15 復刻: MDL 排除邏輯)
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -437,38 +458,6 @@ def identify_columns_v60(table, company):
     if is_msds_table or result_idx == -1: is_reference_table = True
     return item_idx, result_idx, is_reference_table, mdl_idx
 
-def process_halogen_block(pdf, filename, data_pool):
-    for page in pdf.pages:
-        text = (page.extract_text() or "").lower()
-        if "halogen" in text:
-            tables = page.extract_tables()
-            for table in tables:
-                if not table or len(table) < 2: continue
-                for row in table:
-                    clean_row = [clean_text(cell) for cell in row]
-                    row_txt = "".join(clean_row).lower()
-                    matched_key = None
-                    if "fluorine" in row_txt: matched_key = "F"
-                    elif "chlorine" in row_txt: matched_key = "CL"
-                    elif "bromine" in row_txt: matched_key = "BR"
-                    elif "iodine" in row_txt or "lodine" in row_txt: matched_key = "I"
-                    if matched_key:
-                        result_val = ""
-                        for cell in reversed(clean_row):
-                            c_lower = cell.lower()
-                            if "mg/kg" in c_lower or "ppm" in c_lower or "limit" in c_lower or "unit" in c_lower: continue
-                            if "nd" in c_lower or "n.d." in c_lower:
-                                result_val = cell
-                                break
-                            if re.search(r"^\d+(\.\d+)?", cell):
-                                if is_suspicious_limit_value(cell): continue
-                                result_val = cell
-                                break
-                        if result_val:
-                            priority = parse_value_priority(result_val)
-                            if priority[0] > 0:
-                                data_pool[matched_key].append({"priority": priority, "filename": filename})
-
 def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, targets=None):
     lines = text.split('\n')
     for line in lines:
@@ -525,6 +514,38 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
                     data_pool[matched_simple].append({"priority": priority, "filename": filename})
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
+
+def process_halogen_block(pdf, filename, data_pool):
+    for page in pdf.pages:
+        text = (page.extract_text() or "").lower()
+        if "halogen" in text:
+            tables = page.extract_tables()
+            for table in tables:
+                if not table or len(table) < 2: continue
+                for row in table:
+                    clean_row = [clean_text(cell) for cell in row]
+                    row_txt = "".join(clean_row).lower()
+                    matched_key = None
+                    if "fluorine" in row_txt: matched_key = "F"
+                    elif "chlorine" in row_txt: matched_key = "CL"
+                    elif "bromine" in row_txt: matched_key = "BR"
+                    elif "iodine" in row_txt or "lodine" in row_txt: matched_key = "I"
+                    if matched_key:
+                        result_val = ""
+                        for cell in reversed(clean_row):
+                            c_lower = cell.lower()
+                            if "mg/kg" in c_lower or "ppm" in c_lower or "limit" in c_lower or "unit" in c_lower: continue
+                            if "nd" in c_lower or "n.d." in c_lower:
+                                result_val = cell
+                                break
+                            if re.search(r"^\d+(\.\d+)?", cell):
+                                if is_suspicious_limit_value(cell): continue
+                                result_val = cell
+                                break
+                        if result_val:
+                            priority = parse_value_priority(result_val)
+                            if priority[0] > 0:
+                                data_pool[matched_key].append({"priority": priority, "filename": filename})
 
 def process_standard_engine(pdf, filename, company):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
@@ -612,6 +633,13 @@ def process_standard_engine(pdf, filename, company):
                                 result = cell
                                 break
 
+                    # [v63.34 關鍵修正] 針對 SGS 標準版：MDL 數值排除法
+                    # 如果抓到的結果值與 MDL 欄位的值相同 (例如 0.003)，則視為無效
+                    if mdl_idx != -1 and mdl_idx < len(clean_row):
+                        mdl_val = clean_text(clean_row[mdl_idx])
+                        if result == mdl_val and result != "":
+                            result = "" # 捨棄，強迫重新尋找 N.D.
+
                     temp_priority = parse_value_priority(result)
                     if temp_priority[0] == 0:
                         for cell in reversed(clean_row):
@@ -692,10 +720,10 @@ def process_files(files):
                     # 通道 A: 馬來西亞 (v63.28 核心 - 文字掃描)
                     data_pool, date_candidates = process_malaysia_engine(pdf, file.name)
                 elif company == "CTI":
-                    # 通道 B: CTI (v63.15 復刻 - MDL 錨點定位法)
+                    # 通道 B: CTI (v63.34 - MDL錨點 + 多欄加總)
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
                 else:
-                    # 通道 C: 標準 SGS (v63.24 + v63.15 關鍵字)
+                    # 通道 C: 標準 SGS (v63.34 - MDL排除邏輯)
                     data_pool, date_candidates = process_standard_engine(pdf, file.name, company)
                 
                 final_row = {}
@@ -736,9 +764,9 @@ def find_report_start_page(pdf):
 # 8. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.33", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.33 雙核心終極修復版)")
-st.info("💡 v63.33：修正了關鍵字變數名稱導致的崩潰錯誤，並實作雙核心架構：核心一（復刻 v63.15）負責完美處理 CTI/標準 SGS，核心二（外掛 v63.28）專門處理馬來西亞報告。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.34", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.34 雙核心補完版)")
+st.info("💡 v63.34：\n1. 修復 CTI 多樣品報告：補回多欄位掃描與數值加總邏輯。\n2. 修復 SGS 標準報告：補回 MDL 數值排除邏輯，解決誤抓 0.003 問題。\n3. 馬來西亞引擎保持獨立，不受影響。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -760,7 +788,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.33.xlsx",
+            file_name="SGS_CTI_Summary_v63.34.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
