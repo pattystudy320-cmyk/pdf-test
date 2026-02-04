@@ -26,7 +26,7 @@ SIMPLE_KEYWORDS = {
     "BBP": ["BBP", "Butyl benzyl phthalate"],
     "DBP": ["DBP", "Dibutyl phthalate"],
     "DIBP": ["DIBP", "Diisobutyl phthalate"],
-    # v63.30 Fix: 加回 "PFOS" 短關鍵字，解決 CTI 報告空格排版問題
+    # v63.31: 保留 "PFOS" 短關鍵字，但移除程式碼中的過濾邏輯
     "PFOS": ["Perfluorooctane sulfonates", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid", "全氟辛烷磺酸", "Perfluorooctane Sulfonamide", "PFOS and its salts", "PFOS 及其盐", "PFOS"],
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
@@ -34,7 +34,7 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "lodine"]
 }
 
-# v63.29 Fix: 恢復完整關鍵字清單，確保 CTI 能識別單項 PBB/PBDE
+# v63.29: 恢復完整關鍵字清單，確保 CTI 能識別單項 PBB/PBDE
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和", "多溴聯苯之和", "多溴联苯之和",
@@ -214,13 +214,13 @@ def extract_result_malaysia_v7(text, keyword, item_name):
             # --- 數字抓取 ---
             nums = re.findall(r"\b\d+(?:\.\d+)?\b", context)
             
-            # [v63.28 關鍵修正] 如果沒找到數字 (可能 Limit 1000 被刪了)，直接回傳 N.D.
+            # [v63.28 關鍵: 無數字回傳 N.D.]
             if not nums:
                 return "N.D."
 
             final_val = None
 
-            # 特權項目: PBB / PBDE
+            # 特權項目
             if item_name in ["PBB", "PBDE"]:
                 final_val = nums[0]
             else:
@@ -234,7 +234,6 @@ def extract_result_malaysia_v7(text, keyword, item_name):
                     except: pass
                     final_val = candidate
                 elif len(nums) == 1:
-                    # 只剩一個數字，視為 MDL -> 回傳 N.D.
                     return "N.D."
 
             # --- 黑名單過濾 ---
@@ -280,7 +279,7 @@ def process_malaysia_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 4. SGS 標準引擎 (v63.24: 含鹵素區塊 & 智慧表格)
+# 4. SGS 標準引擎 (v63.24: 含鹵素區塊 & 智慧表格，移除 v63.30 的 PFOS 過濾)
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -404,9 +403,7 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             
-            # v63.30 Fix: PFOS 衍生字排除 (針對標準引擎)
-            if key == "PFOS" and any(bad in line_lower for bad in ["pfosa", "pfosf", "pfos-f", "related"]): continue
-
+            # v63.31 Fix: 移除 v63.30 的 PFOS 排除邏輯，回復 v63.15 狀態
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue 
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -593,9 +590,7 @@ def process_standard_engine(pdf, filename, company):
                     if priority[0] == 0: continue
 
                     for target_key, keywords in SIMPLE_KEYWORDS.items():
-                        # v63.30 Fix: PFOS 衍生字排除 (針對標準引擎)
-                        if target_key == "PFOS" and any(bad in item_name_lower for bad in ["pfosa", "pfosf", "pfos-f", "related"]): continue
-
+                        # v63.31 Fix: 移除 v63.30 的 PFOS 排除邏輯
                         if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
                         if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
                         if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -744,9 +739,7 @@ def process_cti_engine(pdf, filename):
                 best_prio = sorted(row_candidates, key=lambda x: (x[0], x[1]), reverse=True)[0]
                 
                 for key, kws in SIMPLE_KEYWORDS.items():
-                    # v63.30 Fix: PFOS 衍生字排除 (針對 CTI 引擎)
-                    if key == "PFOS" and any(bad in item_text for bad in ["pfosa", "pfosf", "pfos-f", "derivative", "related"]): continue
-
+                    # v63.31 Fix: 移除 v63.30 的 PFOS 排除邏輯，回復 v63.15 狀態
                     if key == "Cd" and any(bad in item_text for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
                     if key == "F" and any(bad in item_text for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
                     if key == "BR" and any(bad in item_text for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -782,10 +775,10 @@ def process_files(files):
                     # 通道 C: 馬來西亞專用 (v63.28: 補上 nums為空回傳 N.D.)
                     data_pool, date_candidates = process_malaysia_engine(pdf, file.name)
                 elif company == "CTI":
-                    # 通道 B: CTI 專用
+                    # 通道 B: CTI 專用 (v63.31: 移除 PFOS 過濾)
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
                 else:
-                    # 通道 A: 標準/中國 SGS 專用 (v63.24)
+                    # 通道 A: 標準/中國 SGS 專用 (v63.31: 移除 PFOS 過濾)
                     data_pool, date_candidates = process_standard_engine(pdf, file.name, company)
                 
                 final_row = {}
@@ -827,9 +820,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.30", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.30 PFOS 智能過濾版)")
-st.info("💡 v63.30：加回 PFOS 短關鍵字以解決 CTI 報告空格排版問題，並新增智能過濾機制，防止誤抓 PFOSF/PFOSA 等衍生字，同時保留所有前代修正。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.31", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.31 CTI/PFOS 回歸原始邏輯修復版)")
+st.info("💡 v63.31：移除 CTI 與標準引擎中的 PFOS 過濾邏輯，回歸 v63.15 的寬鬆匹配，修復因註腳干擾導致的漏抓問題；馬來西亞引擎與標準引擎的鹵素區塊功能保持不變。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -851,7 +844,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.30.xlsx",
+            file_name="SGS_CTI_Summary_v63.31.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
