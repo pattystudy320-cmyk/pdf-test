@@ -133,7 +133,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 3. SGS 馬來西亞專用引擎 (v63.27: 邏輯順序修正版)
+# 3. SGS 馬來西亞專用引擎 (v63.28: 邏輯完全復刻版)
 # =============================================================================
 
 def extract_date_malaysia_v7(text):
@@ -159,7 +159,9 @@ def extract_date_malaysia_v7(text):
 
 def extract_result_malaysia_v7(text, keyword, item_name):
     """
-    v63.27 修正: N.D. 判定優先於數字抓取
+    v63.28 修正: 
+    1. 恢復 2 行上下文 (非 DEHP)
+    2. 補上 "nums 為空時回傳 N.D." 的邏輯
     """
     lines = text.splitlines()
 
@@ -170,7 +172,8 @@ def extract_result_malaysia_v7(text, keyword, item_name):
             if item_name == "DEHP":
                 context = " ".join(lines[i:i+4])
             else:
-                context = " ".join(lines[i:i+3]) # 與您的程式邏輯保持一致
+                # v63.28: 改回 2 行，與您的程式馬來西亞.txt  一致
+                context = " ".join(lines[i:i+2]) 
 
             # --- Cleaning (除噪) ---
             if item_name == "DEHP":
@@ -183,8 +186,7 @@ def extract_result_malaysia_v7(text, keyword, item_name):
             context = re.sub(r"\b(19|20)\d{2}\b", " ", context) 
             context = re.sub(r"(Max|Limit|MDL|LOQ)\s*\d+(\.\d+)?", " ", context, flags=re.IGNORECASE)
 
-            # --- [v63.27 修正點] N.D. 判定 (最高優先級) ---
-            # 必須先判斷 N.D.，避免 PBB/PBDE 誤抓到後面的 Limit 數值
+            # --- N.D. 判定 (優先) ---
             nd_pattern = r"(\bN\s*\.?\s*D\s*\.?\b)|(Not\s*Detected)"
             if re.search(nd_pattern, context, re.IGNORECASE):
                 return "N.D."
@@ -193,11 +195,15 @@ def extract_result_malaysia_v7(text, keyword, item_name):
 
             # --- 數字抓取 ---
             nums = re.findall(r"\b\d+(?:\.\d+)?\b", context)
-            if not nums: continue
+            
+            # [v63.28 關鍵修正] 如果沒找到數字 (可能 Limit 1000 被刪了)，直接回傳 N.D.
+            # 這是 PBB/PBDE 能抓到的關鍵，復刻您的程式邏輯 
+            if not nums:
+                return "N.D."
 
             final_val = None
 
-            # 特權項目: PBB / PBDE (MDL 為 Dash "-")
+            # 特權項目: PBB / PBDE
             if item_name in ["PBB", "PBDE"]:
                 final_val = nums[0]
             else:
@@ -330,7 +336,7 @@ def identify_columns_v60(table, company):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
                         if result_idx == -1: result_idx = c_idx
             else:
-                if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
+                if ("result" in txt or "結果" in txt or "結果" in txt or re.search(r"00[1-9]", txt)):
                     if result_idx == -1: result_idx = c_idx
     
     if result_idx == -1 and company == "SGS" and mdl_idx != -1:
@@ -746,7 +752,7 @@ def process_files(files):
                 
                 # 分流邏輯
                 if "MALAYSIA" in first_page_text and "SGS" in first_page_text:
-                    # 通道 C: 馬來西亞專用 (v63.27: 修正 N.D. 優先順序)
+                    # 通道 C: 馬來西亞專用 (v63.28: 補上 nums為空回傳 N.D.)
                     data_pool, date_candidates = process_malaysia_engine(pdf, file.name)
                 elif company == "CTI":
                     # 通道 B: CTI 專用
@@ -794,9 +800,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.27", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.27 馬來西亞邏輯順序修正版)")
-st.info("💡 v63.27：針對馬來西亞引擎修正了 PBB/PBDE 的判定順序，將 N.D. 檢查優先級調高於數字抓取，防止誤抓 Limit 數值，完美還原原始有效邏輯。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.28", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.28 馬來西亞邏輯完全復刻版)")
+st.info("💡 v63.28：修正了 PBB/PBDE 因 Limit 數值被刪除而抓不到 N.D. 的問題，並調整上下文讀取行數以完全匹配原始有效的馬來西亞腳本。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -818,7 +824,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.27.xlsx",
+            file_name="SGS_CTI_Summary_v63.28.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
