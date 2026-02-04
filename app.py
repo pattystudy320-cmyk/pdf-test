@@ -29,8 +29,7 @@ SIMPLE_KEYWORDS = {
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
     "BR": ["Bromine", "溴"],
-    # v63.22 Fix: 增加 "lodine" (小寫L) 以處理 OCR 誤判
-    "I": ["Iodine", "碘", "lodine"]
+    "I": ["Iodine", "碘", "lodine"] # v63.22/23: 包含 lodine 處理 OCR 錯誤
 }
 
 GROUP_KEYWORDS = {
@@ -141,7 +140,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 3. 引擎 A: 標準引擎 (Standard Engine) - v63.22 ND解放版
+# 3. 引擎 A: 標準引擎 (Standard Engine) - v63.23 終極容錯版
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -209,28 +208,25 @@ def identify_columns_v60(table, company):
             txt = clean_text(cell).lower()
             if not txt: continue
             
-            # v63.20: Parameter 識別
             if "test item" in txt or "tested item" in txt or "測試項目" in txt or "检测项目" in txt or "parameter" in txt:
                 if item_idx == -1: item_idx = c_idx
             if "mdl" in txt or "loq" in txt:
                 if mdl_idx == -1: mdl_idx = c_idx
             
             if company == "SGS":
-                 # v63.20: A.C006 Regex 支援
+                 # v63.23 Fix: Regex 支援大小寫 (A.C006)
                  if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt) or 
-                    re.search(r"^[a-z]?\s*\.?\s*[a-z]?\d+", txt) or re.search(r"[a-z]\s*\.\s*[a-z]\d+", txt) or "no." in txt):
+                    re.search(r"^[a-zA-Z]?\s*\.?\s*[a-zA-Z]?\d+", txt) or re.search(r"[a-zA-Z]\s*\.\s*[a-zA-Z]\d+", txt) or "no." in txt):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
                         if result_idx == -1: result_idx = c_idx
             else:
                 if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
                     if result_idx == -1: result_idx = c_idx
     
-    # v63.21 Fix: 內容為王 (Content-Based)
+    # v63.21/22: 內容為王 (Content-Based)
     if result_idx == -1 and company == "SGS" and mdl_idx != -1:
-        
         forbidden_headers = ["unit", "method", "limit", "mdl", "loq", "item", "cas"]
         
-        # 檢查左邊 (MDL-1)
         left_idx = mdl_idx - 1
         left_score = 0
         if left_idx >= 0:
@@ -238,11 +234,9 @@ def identify_columns_v60(table, company):
             if not any(fb in header for fb in forbidden_headers):
                 for r in range(1, min(5, len(table))):
                     val = clean_text(table[r][left_idx]).lower()
-                    # v63.22 Fix: 增加 "nd" (無點) 檢查
                     if "n.d." in val or "nd" in val or re.search(r"\d", val): left_score += 1
                     if "mg/kg" in val: left_score -= 5
         
-        # 檢查右邊 (MDL+1)
         right_idx = mdl_idx + 1
         right_score = 0
         if right_idx < len(table[0]):
@@ -250,7 +244,6 @@ def identify_columns_v60(table, company):
             if not any(fb in header for fb in forbidden_headers):
                 for r in range(1, min(5, len(table))):
                     val = clean_text(table[r][right_idx]).lower()
-                    # v63.22 Fix: 增加 "nd" (無點) 檢查
                     if "n.d." in val or "nd" in val or re.search(r"\d", val): right_score += 1
                     if "mg/kg" in val: right_score -= 5
         
@@ -282,10 +275,7 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
-            
-            # v63.20 Defense: indeno
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue 
-            
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
             if key == "Pb" and any(bad in line_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
@@ -353,7 +343,19 @@ def process_standard_engine(pdf, filename, company):
         tables = page.extract_tables()
         for table in tables:
             if not table or len(table) < 2: continue
+            
             item_idx, result_idx, is_skip, mdl_idx = identify_columns_v60(table, company)
+            
+            # v63.23 Fix: 暴力掃描模式 (Force Scan Mode)
+            # 如果判定為 skip，但表格內文包含鹵素關鍵字，則強制掃描
+            force_scan = False
+            if is_skip:
+                table_str = str(table).lower()
+                if any(k in table_str for k in ["fluorine", "chlorine", "bromine", "iodine", "lodine"]):
+                    force_scan = True
+                    is_skip = False
+                    if item_idx == -1: item_idx = 0 # 預設第0欄為項目
+
             if is_skip: continue
             
             for row in table:
@@ -362,10 +364,9 @@ def process_standard_engine(pdf, filename, company):
                 
                 rows_to_process = []
                 
-                # v63.20: 強力拆行清洗
+                # 強力拆行清洗
                 if "\n" in raw_item_cell:
                     split_items = [x.strip() for x in raw_item_cell.split('\n') if x.strip()]
-                    
                     if "\n" in raw_result_cell:
                         split_results = [x.strip() for x in raw_result_cell.split('\n') if x.strip()]
                     else:
@@ -405,6 +406,19 @@ def process_standard_engine(pdf, filename, company):
                     if result_idx != -1 and result_idx < len(clean_row):
                         result = clean_row[result_idx]
                     
+                    # v63.23 Fix: 暴力行內掃描 (如果 Result 沒定位到)
+                    if result == "" and force_scan:
+                        for cell in reversed(clean_row):
+                            c_lower = cell.lower()
+                            if "mg/kg" in c_lower or "ppm" in c_lower: continue
+                            if "nd" in c_lower or "n.d." in c_lower:
+                                result = cell
+                                break
+                            if re.search(r"^\d+(\.\d+)?", cell):
+                                if is_suspicious_limit_value(cell): continue
+                                result = cell
+                                break
+
                     temp_priority = parse_value_priority(result)
                     if temp_priority[0] == 0:
                         for cell in reversed(clean_row):
@@ -600,7 +614,7 @@ def process_malaysia_engine(pdf, filename):
     
     date_candidates = extract_dates_v63_13_global(text_for_dates)
     
-    # 2. 移植 v63.22 標準引擎表格邏輯 (含 ND 格式解放)
+    # 2. 移植 v63.23 標準引擎表格邏輯 (含大小寫Regex與暴力掃描)
     company = "SGS" 
     file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
 
@@ -609,8 +623,17 @@ def process_malaysia_engine(pdf, filename):
         for table in tables:
             if not table or len(table) < 2: continue
             
-            # 使用增強版的 identify_columns_v60
             item_idx, result_idx, is_skip, mdl_idx = identify_columns_v60(table, company)
+            
+            # v63.23 Fix: 移植暴力掃描
+            force_scan = False
+            if is_skip:
+                table_str = str(table).lower()
+                if any(k in table_str for k in ["fluorine", "chlorine", "bromine", "iodine", "lodine"]):
+                    force_scan = True
+                    is_skip = False
+                    if item_idx == -1: item_idx = 0
+
             if is_skip: continue
             
             for row in table:
@@ -661,6 +684,19 @@ def process_malaysia_engine(pdf, filename):
                     if result_idx != -1 and result_idx < len(clean_row):
                         result = clean_row[result_idx]
                     
+                    # v63.23 Fix: 移植暴力掃描
+                    if result == "" and force_scan:
+                        for cell in reversed(clean_row):
+                            c_lower = cell.lower()
+                            if "mg/kg" in c_lower or "ppm" in c_lower: continue
+                            if "nd" in c_lower or "n.d." in c_lower:
+                                result = cell
+                                break
+                            if re.search(r"^\d+(\.\d+)?", cell):
+                                if is_suspicious_limit_value(cell): continue
+                                result = cell
+                                break
+
                     temp_priority = parse_value_priority(result)
                     if temp_priority[0] == 0:
                         for cell in reversed(clean_row):
@@ -763,9 +799,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.22", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.22 ND解放版)")
-st.info("💡 v63.22：修正了對 'n.d.' (帶點) 的嚴格依賴，現在能識別 'ND' (無點)，並增加 lodine 關鍵字以對抗 OCR 錯誤，全面修復 SGS CMR 報告漏抓問題。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.23", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.23 終極容錯版)")
+st.info("💡 v63.23：修復了 Regex 大小寫敏感問題 (解決 A.C006)，並引入暴力行內掃描 (Force Row Scan)，確保即使欄位定位失敗，只要數據存在就能被抓取。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -787,7 +823,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.22.xlsx",
+            file_name="SGS_CTI_Summary_v63.23.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
