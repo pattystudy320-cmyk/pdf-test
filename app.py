@@ -16,7 +16,7 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
-# v63.34: 保持 v63.15 設定，PFOS 包含短關鍵字
+# v63.15 設定：包含 PFOS 短關鍵字
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "鉛", "Pb"],
     "Cd": ["Cadmium", "鎘", "Cd"],
@@ -33,7 +33,7 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "lodine"]
 }
 
-# v63.34: 保持 v63.15 設定，PBB/PBDE 包含所有單項
+# v63.15 設定：包含所有單項 PBB/PBDE
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和", "多溴聯苯之和",
@@ -110,7 +110,8 @@ def is_valid_date(dt):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
-        if n in [1000.0, 100.0, 50.0, 25.0, 10.0, 5.0, 2.0]: return True
+        # v63.35 Fix: 加入小數點 MDL 黑名單，防止 SGS 誤抓 0.003
+        if n in [1000.0, 100.0, 50.0, 25.0, 10.0, 5.0, 2.0, 0.003, 0.005, 0.01, 0.05, 0.050, 0.0005]: return True
         return False
     except: return False
 
@@ -142,6 +143,16 @@ def parse_value_priority(value_str):
             return (3, number, val)
         except: pass
     return (0, 0, val)
+
+def format_output_value(val):
+    """v63.35: 格式化輸出，如果是整數 float 則轉 int，否則保留"""
+    try:
+        f = float(val)
+        if f.is_integer():
+            return str(int(f))
+        return str(f)
+    except:
+        return str(val)
 
 def identify_company(text):
     txt = text.lower()
@@ -243,7 +254,7 @@ def process_malaysia_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 5. [Core 1] CTI 專用引擎 (v63.15 復刻: MDL錨點 + 多欄加總)
+# 5. [Core 1] CTI 專用引擎 (v63.35 修正: Max Rule + TBBP防呆)
 # =============================================================================
 
 def extract_dates_v63_13_global(text):
@@ -287,7 +298,6 @@ def process_cti_engine(pdf, filename):
         for table in tables:
             if not table or len(table) < 2: continue
             
-            # v63.15 復刻：MDL 錨點定位法
             mdl_col_idx = -1
             item_col_idx = -1
             cols = len(table[0])
@@ -299,7 +309,6 @@ def process_cti_engine(pdf, filename):
                     mdl_col_idx = c
                     break
             
-            # 若無表頭，用內容特徵判斷
             if mdl_col_idx == -1:
                 for c in range(cols):
                     num_count = 0
@@ -323,13 +332,11 @@ def process_cti_engine(pdf, filename):
                     break
             if item_col_idx == -1: item_col_idx = 0
 
-            # 3. [v63.34 關鍵修正] 多樣品欄位加總邏輯
-            # 掃描 Item 欄與 MDL 欄之間的所有欄位
+            # 3. 多樣品欄位掃描 (Item ~ MDL)
             data_col_indices = []
             for c in range(item_col_idx + 1, mdl_col_idx):
                 data_col_indices.append(c)
             
-            # 若中間沒欄位，則退回到只取 MDL 左邊那欄
             if not data_col_indices:
                 data_col_indices = [mdl_col_idx - 1]
 
@@ -338,25 +345,31 @@ def process_cti_engine(pdf, filename):
                 if len(row) <= mdl_col_idx: continue
                 item_text = clean_text(row[item_col_idx]).lower()
                 
-                # 加總所有樣品數據
-                total_value = 0.0
-                detected_count = 0
+                # [v63.35 Fix] TBBP-A 防呆
+                if "tbbp" in item_text or "tetrabromo" in item_text: continue
+
+                # [v63.35 Fix] 多樣品 Max Rule 邏輯
+                valid_numbers = []
+                has_negative = False
                 has_nd = False
                 
                 for c_idx in data_col_indices:
                     if c_idx < len(row):
                         raw_val = clean_text(row[c_idx])
                         prio = parse_value_priority(raw_val)
-                        # prio: (score, number, string)
-                        if prio[0] == 3: # 數值
-                            total_value += prio[1]
-                            detected_count += 1
-                        elif prio[0] == 1: # N.D.
+                        if prio[0] == 3:
+                            valid_numbers.append(prio[1])
+                        elif prio[0] == 2:
+                            has_negative = True
+                        elif prio[0] == 1:
                             has_nd = True
                 
                 final_prio = (0, 0, "")
-                if detected_count > 0:
-                    final_prio = (3, total_value, str(total_value))
+                if valid_numbers:
+                    max_val = max(valid_numbers) # 取最大值
+                    final_prio = (3, max_val, str(max_val))
+                elif has_negative:
+                    final_prio = (2, 0, "NEGATIVE")
                 elif has_nd:
                     final_prio = (1, 0, "N.D.")
                 
@@ -376,7 +389,7 @@ def process_cti_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 6. [Core 1] SGS 標準引擎 (v63.15 復刻: MDL 排除邏輯)
+# 6. [Core 1] SGS 標準引擎 (v63.35 修正: TBBP防呆 + 0.003防呆)
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -469,6 +482,9 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
+            # [v63.35 Fix] TBBP 防呆
+            if key == "BBP" and ("tbbp" in line_lower or "tetrabromo" in line_lower): continue
+
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue 
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
             if key == "BR" and any(bad in line_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -633,12 +649,11 @@ def process_standard_engine(pdf, filename, company):
                                 result = cell
                                 break
 
-                    # [v63.34 關鍵修正] 針對 SGS 標準版：MDL 數值排除法
-                    # 如果抓到的結果值與 MDL 欄位的值相同 (例如 0.003)，則視為無效
+                    # MDL 數值排除法
                     if mdl_idx != -1 and mdl_idx < len(clean_row):
                         mdl_val = clean_text(clean_row[mdl_idx])
                         if result == mdl_val and result != "":
-                            result = "" # 捨棄，強迫重新尋找 N.D.
+                            result = "" 
 
                     temp_priority = parse_value_priority(result)
                     if temp_priority[0] == 0:
@@ -657,6 +672,9 @@ def process_standard_engine(pdf, filename, company):
                     if priority[0] == 0: continue
 
                     for target_key, keywords in SIMPLE_KEYWORDS.items():
+                        # [v63.35 Fix] TBBP 防呆
+                        if target_key == "BBP" and ("tbbp" in item_name_lower or "tetrabromo" in item_name_lower): continue
+
                         if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
                         if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
                         if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -720,10 +738,10 @@ def process_files(files):
                     # 通道 A: 馬來西亞 (v63.28 核心 - 文字掃描)
                     data_pool, date_candidates = process_malaysia_engine(pdf, file.name)
                 elif company == "CTI":
-                    # 通道 B: CTI (v63.34 - MDL錨點 + 多欄加總)
+                    # 通道 B: CTI (v63.35 - Max Rule + TBBP防呆)
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
                 else:
-                    # 通道 C: 標準 SGS (v63.34 - MDL排除邏輯)
+                    # 通道 C: 標準 SGS (v63.35 - 0.003排除 + TBBP防呆)
                     data_pool, date_candidates = process_standard_engine(pdf, file.name, company)
                 
                 final_row = {}
@@ -740,8 +758,10 @@ def process_files(files):
                     if k in ["日期", "檔案名稱"]: continue
                     candidates = data_pool.get(k, [])
                     if candidates:
+                        # 排序優先級 (3:Num, 2:Neg, 1:ND)
                         best = sorted(candidates, key=lambda x: (x['priority'][0], x['priority'][1]), reverse=True)[0]
-                        final_row[k] = best['priority'][2]
+                        # 數值格式化 (v63.35: 去除 .0)
+                        final_row[k] = format_output_value(best['priority'][2])
                     else:
                         final_row[k] = ""
                 
@@ -764,9 +784,9 @@ def find_report_start_page(pdf):
 # 8. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.34", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.34 雙核心補完版)")
-st.info("💡 v63.34：\n1. 修復 CTI 多樣品報告：補回多欄位掃描與數值加總邏輯。\n2. 修復 SGS 標準報告：補回 MDL 數值排除邏輯，解決誤抓 0.003 問題。\n3. 馬來西亞引擎保持獨立，不受影響。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.35", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.35 雙核心．數值修正終極版)")
+st.info("💡 v63.35：修正 CTI 多樣品加總邏輯為「取最大值」、排除 CTI 誤抓 TBBP-A、排除 SGS 誤抓 0.003 MDL，並優化輸出格式（去除 .0）。馬來西亞引擎保持獨立運作。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -788,7 +808,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.34.xlsx",
+            file_name="SGS_CTI_Summary_v63.35.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
