@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 
 # =============================================================================
-# 1. 定義欄位與關鍵字 (v63.24 大全配版本)
+# 1. 定義欄位與關鍵字 (v63.15 大全配版本)
 # =============================================================================
 
 OUTPUT_COLUMNS = [
@@ -16,6 +16,7 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
+# v63.15 設定：包含 PFOS 短關鍵字，且後續不設排除邏輯
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "鉛", "Pb"],
     "Cd": ["Cadmium", "鎘", "Cd"],
@@ -32,6 +33,7 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "lodine"]
 }
 
+# v63.15 設定：包含所有單項 PBB/PBDE，確保 CTI 能識別
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和", "多溴聯苯之和",
@@ -121,7 +123,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 3. SGS 標準引擎 (v63.24)
+# 3. SGS 標準引擎 (v63.15 核心 - 含 MDL 排除邏輯)
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -413,7 +415,8 @@ def process_standard_engine(pdf, filename, company):
                                 result = cell
                                 break
 
-                    # v63.34 Backport: SGS 標準引擎 MDL 排除邏輯
+                    # v63.15 關鍵邏輯：MDL 數值排除法
+                    # 如果抓到的結果值與 MDL 欄位的值相同 (例如 0.003)，則視為無效，改抓 N.D.
                     if mdl_idx != -1 and mdl_idx < len(clean_row):
                         mdl_val = clean_text(clean_row[mdl_idx])
                         if result == mdl_val and result != "":
@@ -481,7 +484,7 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 5. CTI 專用引擎 (v63.13)
+# 4. CTI 專用引擎 (v63.15 核心 - 多樣品加總)
 # =============================================================================
 
 def extract_dates_v63_13_global(text):
@@ -540,8 +543,8 @@ def process_cti_engine(pdf, filename):
         for table in tables:
             if not table or len(table) < 2: continue
             
-            item_col_idx = -1
             mdl_col_idx = -1
+            item_col_idx = -1
             cols = len(table[0])
             
             # 1. 尋找 MDL 欄位
@@ -574,11 +577,12 @@ def process_cti_engine(pdf, filename):
                     break
             if item_col_idx == -1: item_col_idx = 0 
             
-            # 3. v63.34 Backport: 多樣品欄位加總
+            # 3. v63.15 多樣品加總邏輯 (Item 與 MDL 之間的所有欄位)
             data_col_indices = []
             for c in range(item_col_idx + 1, mdl_col_idx):
                 data_col_indices.append(c)
             
+            # 若無中間欄位，退回只抓 MDL 左邊
             if not data_col_indices:
                 data_col_indices = [mdl_col_idx - 1]
             
@@ -586,6 +590,7 @@ def process_cti_engine(pdf, filename):
                 if len(row) <= mdl_col_idx: continue
                 item_text = clean_text(row[item_col_idx]).lower()
                 
+                # 加總
                 total_value = 0.0
                 detected_count = 0
                 has_nd = False
@@ -609,6 +614,7 @@ def process_cti_engine(pdf, filename):
                 if final_prio[0] == 0: continue
                 
                 for key, kws in SIMPLE_KEYWORDS.items():
+                    # v63.15: PFOS 無過濾
                     if key == "Cd" and any(bad in item_text for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
                     if key == "F" and any(bad in item_text for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
                     if key == "BR" and any(bad in item_text for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -626,7 +632,7 @@ def process_cti_engine(pdf, filename):
     return data_pool, final_dates
 
 # =============================================================================
-# 6. 主程式與分流器 (v63.24: 不含馬來西亞專用通道)
+# 5. 主程式與分流器 (v63.15 無馬來西亞專用通道)
 # =============================================================================
 
 def process_files(files):
@@ -639,12 +645,12 @@ def process_files(files):
                 first_page_text = (pdf.pages[0].extract_text() or "").upper()
                 company = identify_company(first_page_text)
                 
-                # 分流邏輯: v63.24 沒有馬來西亞專用通道
+                # 分流邏輯: v63.15 只有 CTI 和 標準 SGS
                 if company == "CTI":
-                    # CTI 專用 (v63.13)
+                    # CTI 專用 (v63.15: 多樣品加總 + 無過濾)
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
                 else:
-                    # 標準/中國 SGS 專用 (v63.24) -> 馬來西亞也會走這裡
+                    # 標準/中國/馬來西亞 SGS 專用 (v63.15: MDL排除邏輯 + 智慧表格)
                     data_pool, date_candidates = process_standard_engine(pdf, file.name, company)
                 
                 final_row = {}
@@ -683,12 +689,12 @@ def find_report_start_page(pdf):
     return 0
 
 # =============================================================================
-# 7. UI
+# 6. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.24", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.24 標準穩定版)")
-st.info("💡 v63.24：此版本為馬來西亞報告分流前的穩定版本。包含完整的化學物質關鍵字庫，適用於標準 SGS 與 CTI 報告。請注意，此版本尚未針對馬來西亞報告的日期與 Limit 誤抓問題進行修正。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.15", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.15 經典穩定版)")
+st.info("💡 v63.15：此版本為 CTI 與標準 SGS 報告的最穩定版本，包含完整的化學物質關鍵字庫、CTI 多樣品加總邏輯，以及 SGS 的 MDL 數值排除機制。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -710,7 +716,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.24.xlsx",
+            file_name="SGS_CTI_Summary_v63.15.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
