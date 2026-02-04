@@ -16,7 +16,7 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
-# --- [Standard Engine] 標準 SGS / CTI 用的關鍵字 (Table Based) ---
+# --- [Standard Engine & CTI Engine] 通用關鍵字庫 (Table Based) ---
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "鉛", "Pb"],
     "Cd": ["Cadmium", "鎘", "Cd"],
@@ -33,9 +33,32 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "lodine"]
 }
 
+# v63.29 Fix: 恢復完整關鍵字清單，確保 CTI 能識別單項 PBB/PBDE
 GROUP_KEYWORDS = {
-    "PBB": ["Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和", "多溴聯苯之和"],
-    "PBDE": ["Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和", "多溴二苯醚之和"]
+    "PBB": [
+        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和", "多溴聯苯之和", "多溴联苯之和",
+        "Polybromobiphenyl", "Polybromobiphenyls",
+        "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
+        "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
+        "Heptabromobiphenyl", "Octabromobiphenyl", "Nonabromobiphenyl", 
+        "Decabromobiphenyl", 
+        "Monobrominated", "Dibrominated", "Tribrominated", 
+        "Tetrabrominated", "Pentabrominated", "Hexabrominated", 
+        "Heptabrominated", "Octabrominated", "Nonabrominated", 
+        "Decabrominated", "bromobiphenyl"
+    ],
+    "PBDE": [
+        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和", "多溴二苯醚之和", "多溴二苯醚之和",
+        "Polybromodiphenyl ether", "Polybromodiphenyl ethers",
+        "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
+        "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
+        "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
+        "Decabromodiphenyl ether", 
+        "Monobrominated Diphenyl", "Dibrominated Diphenyl", "Tribrominated Diphenyl",
+        "Tetrabrominated Diphenyl", "Pentabrominated Diphenyl", "Hexabrominated Diphenyl",
+        "Heptabrominated Diphenyl", "Octabrominated Diphenyl", "Nonabrominated Diphenyl",
+        "Decabrominated Diphenyl", "bromodiphenyl ether"
+    ]
 }
 
 PFAS_SUMMARY_KEYWORDS = ["Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質"]
@@ -158,11 +181,6 @@ def extract_date_malaysia_v7(text):
     return None
 
 def extract_result_malaysia_v7(text, keyword, item_name):
-    """
-    v63.28 修正: 
-    1. 恢復 2 行上下文 (非 DEHP)
-    2. 補上 "nums 為空時回傳 N.D." 的邏輯
-    """
     lines = text.splitlines()
 
     for i, line in enumerate(lines):
@@ -172,10 +190,9 @@ def extract_result_malaysia_v7(text, keyword, item_name):
             if item_name == "DEHP":
                 context = " ".join(lines[i:i+4])
             else:
-                # v63.28: 改回 2 行，與您的程式馬來西亞.txt  一致
-                context = " ".join(lines[i:i+2]) 
+                context = " ".join(lines[i:i+2])
 
-            # --- Cleaning (除噪) ---
+            # --- Cleaning ---
             if item_name == "DEHP":
                 context = re.sub(r"2-ethylhexyl", " ", context, flags=re.IGNORECASE)
                 context = re.sub(r"Di\(2-", " ", context, flags=re.IGNORECASE)
@@ -197,7 +214,6 @@ def extract_result_malaysia_v7(text, keyword, item_name):
             nums = re.findall(r"\b\d+(?:\.\d+)?\b", context)
             
             # [v63.28 關鍵修正] 如果沒找到數字 (可能 Limit 1000 被刪了)，直接回傳 N.D.
-            # 這是 PBB/PBDE 能抓到的關鍵，復刻您的程式邏輯 
             if not nums:
                 return "N.D."
 
@@ -336,7 +352,7 @@ def identify_columns_v60(table, company):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
                         if result_idx == -1: result_idx = c_idx
             else:
-                if ("result" in txt or "結果" in txt or "結果" in txt or re.search(r"00[1-9]", txt)):
+                if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
                     if result_idx == -1: result_idx = c_idx
     
     if result_idx == -1 and company == "SGS" and mdl_idx != -1:
@@ -800,9 +816,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.28", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.28 馬來西亞邏輯完全復刻版)")
-st.info("💡 v63.28：修正了 PBB/PBDE 因 Limit 數值被刪除而抓不到 N.D. 的問題，並調整上下文讀取行數以完全匹配原始有效的馬來西亞腳本。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.29", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.29 關鍵字庫回滾修復版)")
+st.info("💡 v63.29：恢復完整的化學物質關鍵字庫 (PBB/PBDE)，修復了 CTI 報告因關鍵字缺失而導致的 N.D. 誤判；同時保留馬來西亞引擎的文字掃描邏輯與標準引擎的鹵素區塊搜索。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -824,7 +840,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.28.xlsx",
+            file_name="SGS_CTI_Summary_v63.29.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
