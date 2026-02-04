@@ -16,6 +16,7 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
+# 標準引擎用的關鍵字 (Table Based)
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "鉛", "Pb"],
     "Cd": ["Cadmium", "鎘", "Cd"],
@@ -29,58 +30,39 @@ SIMPLE_KEYWORDS = {
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
     "BR": ["Bromine", "溴"],
-    "I": ["Iodine", "碘", "lodine"] # v63.22: 包含 lodine (OCR錯誤)
+    "I": ["Iodine", "碘", "lodine"]
 }
 
 GROUP_KEYWORDS = {
-    "PBB": [
-        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和", "多溴聯苯之和", "多溴联苯之和",
-        "Polybromobiphenyl", "Polybromobiphenyls",
-        "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
-        "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
-        "Heptabromobiphenyl", "Octabromobiphenyl", "Nonabromobiphenyl", 
-        "Decabromobiphenyl", 
-        "Monobrominated", "Dibrominated", "Tribrominated", 
-        "Tetrabrominated", "Pentabrominated", "Hexabrominated", 
-        "Heptabrominated", "Octabrominated", "Nonabrominated", 
-        "Decabrominated", "bromobiphenyl"
-    ],
-    "PBDE": [
-        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和", "多溴二苯醚之和", "多溴二苯醚之和",
-        "Polybromodiphenyl ether", "Polybromodiphenyl ethers",
-        "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
-        "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
-        "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
-        "Decabromodiphenyl ether", 
-        "Monobrominated Diphenyl", "Dibrominated Diphenyl", "Tribrominated Diphenyl",
-        "Tetrabrominated Diphenyl", "Pentabrominated Diphenyl", "Hexabrominated Diphenyl",
-        "Heptabrominated Diphenyl", "Octabrominated Diphenyl", "Nonabrominated Diphenyl",
-        "Decabrominated Diphenyl", "bromodiphenyl ether"
-    ]
+    "PBB": ["Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和", "多溴聯苯之和"],
+    "PBDE": ["Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和", "多溴二苯醚之和"]
 }
 
-PFAS_SUMMARY_KEYWORDS = [
-    "Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質", "全氟烷基物質"
-]
+PFAS_SUMMARY_KEYWORDS = ["Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質"]
+MSDS_HEADER_KEYWORDS = ["content", "composition", "concentration", "含量", "成分"]
 
-MSDS_HEADER_KEYWORDS = [
-    "content", "composition", "concentration", "含量", "成分"
-]
+# 馬來西亞引擎用的關鍵字映射 (Text Based)
+MY_ITEM_MAP = {
+    "Pb": "Lead", "Cd": "Cadmium", "Hg": "Mercury", "Cr6+": "Hexavalent Chromium",
+    "PBB": "PBBs", "PBDE": "PBDEs",
+    "DEHP": "DEHP", "BBP": "BBP", "DBP": "DBP", "DIBP": "DIBP",
+    "PFOS": "Perfluorooctane sulfonates", "PFAS": "PFAS",
+    "F": "Fluorine", "CL": "Chlorine", "BR": "Bromine", "I": "Iodine"
+}
 
-# 手動月份對照表 (解決 Locale 問題)
+# 馬來西亞版專用的 MDL 黑名單
+MY_MDL_BLOCKLIST = {
+    "Pb": [2.0], "Cd": [2.0], "Hg": [2.0], "Cr6+": [8.0, 10.0], # CrVI 改為 Cr6+ 對應 key
+    "F": [50.0], "CL": [50.0], "BR": [50.0], "I": [50.0],
+    "DEHP": [50.0], "BBP": [50.0], "DBP": [50.0], "DIBP": [50.0]
+}
+
+# 手動月份對照表
 MONTH_MAP = {
-    'jan': 1, 'january': 1,
-    'feb': 2, 'february': 2,
-    'mar': 3, 'march': 3,
-    'apr': 4, 'april': 4,
-    'may': 5,
-    'jun': 6, 'june': 6,
-    'jul': 7, 'july': 7,
-    'aug': 8, 'august': 8,
-    'sep': 9, 'september': 9, 'sept': 9,
-    'oct': 10, 'october': 10,
-    'nov': 11, 'november': 11,
-    'dec': 12, 'december': 12
+    'jan': 1, 'january': 1, 'feb': 2, 'february': 2, 'mar': 3, 'march': 3,
+    'apr': 4, 'april': 4, 'may': 5, 'jun': 6, 'june': 6, 'jul': 7, 'july': 7,
+    'aug': 8, 'august': 8, 'sep': 9, 'september': 9, 'sept': 9, 'oct': 10, 'october': 10,
+    'nov': 11, 'november': 11, 'dec': 12, 'december': 12
 }
 
 # =============================================================================
@@ -140,11 +122,116 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 3. 引擎 A: 標準引擎 (Standard Engine) - v63.24 鹵素專區版
+# 3. SGS 馬來西亞專用引擎 (v63.25 新增: 文字掃描邏輯)
+# =============================================================================
+
+def extract_result_malaysia(text, keyword, item_name):
+    """
+    從 V7 版移植過來的核心邏輯
+    專門處理馬來西亞排版 (隱形 N.D.、DEHP 跨行、MDL 誤抓)
+    """
+    lines = text.splitlines()
+
+    for i, line in enumerate(lines):
+        if re.search(keyword, line, re.IGNORECASE):
+            
+            # 1. DEHP 特例: 擴大讀取 4 行
+            if item_name == "DEHP":
+                context = " ".join(lines[i:i+4])
+            else:
+                # 預設讀取 2 行
+                context = " ".join(lines[i:i+2])
+
+            # 2. 除噪: 刪除內鬼與雜訊
+            if item_name == "DEHP":
+                context = re.sub(r"2-ethylhexyl", " ", context, flags=re.IGNORECASE)
+                context = re.sub(r"Di\(2-", " ", context, flags=re.IGNORECASE)
+            
+            context = re.sub(r"mg/kg|ppm|%|wt%", " ", context, flags=re.IGNORECASE)
+            context = re.sub(r"\(?CAS\s*No\.?[\s\d-]+\)?", " ", context, flags=re.IGNORECASE)
+            context = re.sub(r"IEC\s*62321[-\d:+A]*", " ", context, flags=re.IGNORECASE)
+            context = re.sub(r"\b(19|20)\d{2}\b", " ", context) 
+            context = re.sub(r"(Max|Limit|MDL|LOQ)\s*\d+(\.\d+)?", " ", context, flags=re.IGNORECASE)
+
+            # 3. N.D. 判定
+            nd_pattern = r"(\bN\s*\.?\s*D\s*\.?\b)|(Not\s*Detected)"
+            if re.search(nd_pattern, context, re.IGNORECASE):
+                return "N.D."
+            if re.search(r"NEGATIVE", context, re.IGNORECASE):
+                return "NEGATIVE"
+
+            # 4. 數字抓取與黑名單
+            nums = re.findall(r"\b\d+(?:\.\d+)?\b", context)
+            if not nums: continue # 如果這行沒數字，繼續找下一行匹配
+            
+            final_val = None
+            
+            # PBBs/PBDEs 特權 (MDL 為 -)
+            if item_name in ["PBB", "PBDE"]: # 注意 key 對應
+                final_val = nums[0]
+            else:
+                if len(nums) >= 2:
+                    # 防呆年份殘渣
+                    candidate = nums[0]
+                    try:
+                        f_val = float(candidate)
+                        if 1990 <= f_val <= 2030 and f_val.is_integer(): candidate = nums[1]
+                    except: pass
+                    final_val = candidate
+                elif len(nums) == 1:
+                    # 只有一個數字，極可能是 MDL，先暫存，後續過濾
+                    final_val = nums[0]
+
+            # 5. 黑名單過濾
+            if final_val:
+                try:
+                    val_float = float(final_val)
+                    if item_name in MY_MDL_BLOCKLIST:
+                        if val_float in MY_MDL_BLOCKLIST[item_name]:
+                            return "N.D." # 是 MDL，轉為 N.D.
+                    return final_val
+                except: pass
+    return ""
+
+def process_malaysia_engine(pdf, filename):
+    data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
+    
+    # 1. 全文提取 (用於文字掃描)
+    full_text = ""
+    for p in pdf.pages: 
+        full_text += (p.extract_text() or "") + "\n"
+    
+    # 2. 日期抓取 (保留 v63.24 強大的全域串流)
+    text_for_dates = ""
+    for p in pdf.pages[:3]: 
+        text_for_dates += (p.extract_text() or "") + " " 
+    date_candidates = extract_dates_v63_13_global(text_for_dates)
+    
+    # 3. 數據抓取 (使用新植入的文字掃描邏輯)
+    for col_key in OUTPUT_COLUMNS:
+        if col_key in ["日期", "檔案名稱"]: continue
+        
+        # 取得搜尋關鍵字
+        keyword = MY_ITEM_MAP.get(col_key)
+        if not keyword: continue
+        
+        # 執行掃描
+        val = extract_result_malaysia(full_text, keyword, col_key)
+        
+        if val:
+            # 轉換為標準格式存入 data_pool
+            # 優先級模擬：文字掃描抓到的視為高優先級
+            prio = parse_value_priority(val)
+            if prio[0] > 0:
+                data_pool[col_key].append({"priority": prio, "filename": filename})
+
+    return data_pool, date_candidates
+
+# =============================================================================
+# 4. SGS 標準引擎 (v63.24: 含鹵素專用區塊 & 智慧表格)
 # =============================================================================
 
 def extract_dates_v60(text):
-    """v60.5 標準日期提取 (用於 SGS/Intertek)"""
     lines = text.split('\n')
     candidates = []
     
@@ -214,7 +301,6 @@ def identify_columns_v60(table, company):
                 if mdl_idx == -1: mdl_idx = c_idx
             
             if company == "SGS":
-                 # v63.23: Regex 支援大小寫
                  if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt) or 
                     re.search(r"^[a-zA-Z]?\s*\.?\s*[a-zA-Z]?\d+", txt) or re.search(r"[a-zA-Z]\s*\.\s*[a-zA-Z]\d+", txt) or "no." in txt):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
@@ -223,10 +309,8 @@ def identify_columns_v60(table, company):
                 if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt)):
                     if result_idx == -1: result_idx = c_idx
     
-    # v63.21/22: 內容為王 (Content-Based)
     if result_idx == -1 and company == "SGS" and mdl_idx != -1:
         forbidden_headers = ["unit", "method", "limit", "mdl", "loq", "item", "cas"]
-        
         left_idx = mdl_idx - 1
         left_score = 0
         if left_idx >= 0:
@@ -323,22 +407,16 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
 
-# v63.24 New Feature: 鹵素專用區塊搜索
 def process_halogen_block(pdf, filename, data_pool):
     for page in pdf.pages:
         text = (page.extract_text() or "").lower()
-        # 尋找錨點
         if "halogen" in text:
             tables = page.extract_tables()
             for table in tables:
                 if not table or len(table) < 2: continue
-                
-                # 強制掃描該表格的每一行
                 for row in table:
                     clean_row = [clean_text(cell) for cell in row]
                     row_txt = "".join(clean_row).lower()
-                    
-                    # 辨識項目
                     matched_key = None
                     if "fluorine" in row_txt: matched_key = "F"
                     elif "chlorine" in row_txt: matched_key = "CL"
@@ -346,7 +424,6 @@ def process_halogen_block(pdf, filename, data_pool):
                     elif "iodine" in row_txt or "lodine" in row_txt: matched_key = "I"
                     
                     if matched_key:
-                        # 在該行尋找結果
                         result_val = ""
                         for cell in reversed(clean_row):
                             c_lower = cell.lower()
@@ -358,7 +435,6 @@ def process_halogen_block(pdf, filename, data_pool):
                                 if is_suspicious_limit_value(cell): continue
                                 result_val = cell
                                 break
-                        
                         if result_val:
                             priority = parse_value_priority(result_val)
                             if priority[0] > 0:
@@ -387,7 +463,6 @@ def process_standard_engine(pdf, filename, company):
             
             item_idx, result_idx, is_skip, mdl_idx = identify_columns_v60(table, company)
             
-            # 暴力掃描 (Fallback)
             force_scan = False
             if is_skip:
                 table_str = str(table).lower()
@@ -483,6 +558,7 @@ def process_standard_engine(pdf, filename, company):
                             if kw.lower() in item_name_lower:
                                 if target_key == "PFOS" and "related" in item_name_lower: continue 
                                 data_pool[target_key].append({"priority": priority, "filename": filename})
+                                # v63.20 Fix: 確保無 break
                     
                     for group_key, keywords in GROUP_KEYWORDS.items():
                         for kw in keywords:
@@ -490,7 +566,7 @@ def process_standard_engine(pdf, filename, company):
                                 file_group_data[group_key].append(priority)
                                 break
 
-    # v63.24 New Feature: 若鹵素數據仍缺失，啟動專用區塊搜索
+    # v63.24: 鹵素專用區塊搜索 (僅針對標準引擎)
     if not (data_pool["F"] and data_pool["CL"] and data_pool["BR"] and data_pool["I"]):
         process_halogen_block(pdf, filename, data_pool)
 
@@ -521,7 +597,7 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 4. CTI 專用引擎 (v63.13: Global Token Stream)
+# 5. CTI 專用引擎 (v63.13: Global Token Stream)
 # =============================================================================
 
 def extract_dates_v63_13_global(text):
@@ -641,126 +717,6 @@ def process_cti_engine(pdf, filename):
     return data_pool, final_dates
 
 # =============================================================================
-# 5. 馬來西亞專用引擎 (v63.20: 全面移植與升級)
-# =============================================================================
-
-def process_malaysia_engine(pdf, filename):
-    data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
-    
-    # 1. 移植 v63.13 全域串流日期分析
-    text_for_dates = ""
-    for p in pdf.pages[:3]: 
-        text_for_dates += (p.extract_text() or "") + " " 
-    
-    date_candidates = extract_dates_v63_13_global(text_for_dates)
-    
-    # 2. 移植 v63.23 標準引擎表格邏輯 (含 ND 格式解放)
-    company = "SGS" 
-    file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
-
-    for page in pdf.pages:
-        tables = page.extract_tables()
-        for table in tables:
-            if not table or len(table) < 2: continue
-            
-            # 使用增強版的 identify_columns_v60
-            item_idx, result_idx, is_skip, mdl_idx = identify_columns_v60(table, company)
-            if is_skip: continue
-            
-            for row in table:
-                raw_item_cell = str(row[item_idx]) if item_idx < len(row) and row[item_idx] else ""
-                raw_result_cell = str(row[result_idx]) if result_idx != -1 and result_idx < len(row) and row[result_idx] else ""
-                
-                rows_to_process = []
-                
-                # 移植強力拆行清洗
-                if "\n" in raw_item_cell:
-                    split_items = [x.strip() for x in raw_item_cell.split('\n') if x.strip()]
-                    if "\n" in raw_result_cell:
-                        split_results = [x.strip() for x in raw_result_cell.split('\n') if x.strip()]
-                    else:
-                        split_results = [raw_result_cell.strip()] if raw_result_cell.strip() else []
-
-                    if len(split_items) > 1 and len(split_results) == 1:
-                        for si in split_items:
-                            virtual_row = list(row)
-                            virtual_row[item_idx] = si
-                            if result_idx != -1: virtual_row[result_idx] = split_results[0]
-                            rows_to_process.append(virtual_row)
-                    elif len(split_items) == len(split_results):
-                        for si, sr in zip(split_items, split_results):
-                            virtual_row = list(row)
-                            virtual_row[item_idx] = si
-                            if result_idx != -1: virtual_row[result_idx] = sr
-                            rows_to_process.append(virtual_row)
-                    else:
-                        rows_to_process.append(row)
-                else:
-                    rows_to_process.append(row)
-
-                for proc_row in rows_to_process:
-                    clean_row = [clean_text(cell) for cell in proc_row]
-                    row_txt = "".join(clean_row).lower()
-                    if "test item" in row_txt or "result" in row_txt: continue
-                    if not any(clean_row): continue
-                    
-                    target_item_col = item_idx if item_idx != -1 else 0
-                    if target_item_col >= len(clean_row): continue
-                    item_name = clean_row[target_item_col]
-                    item_name_lower = item_name.lower()
-                    
-                    if "pvc" in item_name_lower: continue
-
-                    result = ""
-                    if result_idx != -1 and result_idx < len(clean_row):
-                        result = clean_row[result_idx]
-                    
-                    temp_priority = parse_value_priority(result)
-                    if temp_priority[0] == 0:
-                        for cell in reversed(clean_row):
-                            c_lower = cell.lower()
-                            if not cell: continue
-                            if "nd" in c_lower or "n.d." in c_lower or "negative" in c_lower:
-                                result = cell
-                                break
-                            if re.search(r"^\d+(\.\d+)?", cell):
-                                if is_suspicious_limit_value(cell): continue
-                                result = cell
-                                break
-                    
-                    priority = parse_value_priority(result)
-                    if priority[0] == 0: continue
-
-                    for target_key, keywords in SIMPLE_KEYWORDS.items():
-                        if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
-                        if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
-                        if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
-                        if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
-
-                        for kw in keywords:
-                            if kw.lower() in item_name_lower:
-                                if target_key == "PFOS" and "related" in item_name_lower: continue 
-                                data_pool[target_key].append({"priority": priority, "filename": filename})
-                                break
-                    
-                    for group_key, keywords in GROUP_KEYWORDS.items():
-                        for kw in keywords:
-                            if kw.lower() in item_name_lower:
-                                file_group_data[group_key].append(priority)
-                                break
-
-    # v63.24: 馬來西亞引擎也啟用鹵素專用區塊
-    if not (data_pool["F"] and data_pool["CL"] and data_pool["BR"] and data_pool["I"]):
-        process_halogen_block(pdf, filename, data_pool)
-
-    for group_key, values in file_group_data.items():
-        if values:
-            best_in_file = sorted(values, key=lambda x: (x[0], x[1]), reverse=True)[0]
-            data_pool[group_key].append({"priority": best_in_file, "filename": filename})
-
-    return data_pool, date_candidates
-
-# =============================================================================
 # 6. 主程式與分流器
 # =============================================================================
 
@@ -776,10 +732,13 @@ def process_files(files):
                 
                 # 分流邏輯
                 if "MALAYSIA" in first_page_text and "SGS" in first_page_text:
+                    # 馬來西亞專用 (文字掃描)
                     data_pool, date_candidates = process_malaysia_engine(pdf, file.name)
                 elif company == "CTI":
+                    # CTI 專用 (v63.13)
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
                 else:
+                    # 標準/中國 SGS 專用 (v63.24)
                     data_pool, date_candidates = process_standard_engine(pdf, file.name, company)
                 
                 final_row = {}
@@ -821,9 +780,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.24", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.24 鹵素專用區塊搜索版)")
-st.info("💡 v63.24：新增「鹵素專用區塊搜索 (Halogen Anchor Search)」，利用章節標題精準鎖定並強制解析無鹵表格，無視表格結構異常，徹底解決 SGS 報告漏抓問題。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.25", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.25 雙引擎混合動力版)")
+st.info("💡 v63.25：針對馬來西亞報告植入全新的文字掃描引擎，確保隱形 N.D. 與 MDL 誤判問題徹底解決；同時保留標準引擎的鹵素專用區塊搜索，完美相容 CMR 報告。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -845,7 +804,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.24.xlsx",
+            file_name="SGS_CTI_Summary_v63.25.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
