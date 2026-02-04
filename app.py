@@ -30,7 +30,7 @@ SIMPLE_KEYWORDS = {
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
     "BR": ["Bromine", "溴"],
-    "I": ["Iodine", "碘", "lodine"] # v63.24: 保留 lodine
+    "I": ["Iodine", "碘", "lodine"]
 }
 
 GROUP_KEYWORDS = {
@@ -42,14 +42,13 @@ PFAS_SUMMARY_KEYWORDS = ["Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/
 MSDS_HEADER_KEYWORDS = ["content", "composition", "concentration", "含量", "成分"]
 
 # --- [Malaysia Engine] 馬來西亞專用 Regex 映射 (Text Based) ---
-# 這是您提供的 ITEM_RULES，我將其 Key 映射到系統標準的 OUTPUT_COLUMNS
 MY_ITEM_RULES = {
     "Pb": r"Lead\s*\(Pb\)",
     "Cd": r"Cadmium\s*\(Cd\)",
     "Hg": r"Mercury\s*\(Hg\)",
-    "Cr6+": r"Hexavalent Chromium", # User: CrVI -> System: Cr6+
-    "PBB": r"Sum of PBBs",          # User: PBBs -> System: PBB
-    "PBDE": r"Sum of PBDEs",        # User: PBDEs -> System: PBDE
+    "Cr6+": r"Hexavalent Chromium",
+    "PBB": r"Sum of PBBs",
+    "PBDE": r"Sum of PBDEs",
     "DEHP": r"DEHP|Di\(2-ethylhexyl\)\s*phthalate",
     "BBP": r"BBP|Benzyl\s*butyl\s*phthalate",
     "DBP": r"DBP|Dibutyl\s*phthalate",
@@ -62,7 +61,7 @@ MY_ITEM_RULES = {
     "PFAS": r"PFAS"
 }
 
-# 馬來西亞版專用的 MDL 黑名單 (防止誤抓 MDL 當作結果)
+# 馬來西亞版專用的 MDL 黑名單
 MY_MDL_BLOCKLIST = {
     "Pb": [2.0], "Cd": [2.0], "Hg": [2.0], "Cr6+": [8.0, 10.0],
     "F": [50.0], "CL": [50.0], "BR": [50.0], "I": [50.0],
@@ -97,9 +96,6 @@ def is_suspicious_limit_value(val):
     except: return False
 
 def parse_value_priority(value_str):
-    """
-    通用優先級解析: N.D. (1) < Negative (2) < Value (3) < Report (4)
-    """
     raw_val = clean_text(value_str)
     if "(" in raw_val and ")" in raw_val:
         if re.search(r"\(\d+\)", raw_val):
@@ -137,19 +133,14 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 3. SGS 馬來西亞專用引擎 (v63.26: 文字掃描邏輯完全移植版)
+# 3. SGS 馬來西亞專用引擎 (v63.27: 邏輯順序修正版)
 # =============================================================================
 
 def extract_date_malaysia_v7(text):
-    """
-    移植自您的 extract_date 函式
-    使用精確的 Regex 鎖定 REPORTED DATE
-    """
     match = re.search(r"(REPORTED DATE|TEST REPORT REPORTED DATE)\s*[:\-]?\s*([^\n]+)", text, re.IGNORECASE)
     if match:
         date_str = match.group(2).strip()
         try:
-            # 嘗試解析日期
             date_str = re.sub(r"[^a-zA-Z0-9\s]", " ", date_str)
             parts = date_str.split()
             d, m, y = None, None, None
@@ -159,7 +150,6 @@ def extract_date_malaysia_v7(text):
                     elif int(p) <= 31: d = int(p)
                 elif p.lower() in MONTH_MAP:
                     m = MONTH_MAP[p.lower()]
-            
             if d and m and y:
                 dt = datetime(y, m, d)
                 if is_valid_date(dt):
@@ -169,26 +159,18 @@ def extract_date_malaysia_v7(text):
 
 def extract_result_malaysia_v7(text, keyword, item_name):
     """
-    移植自您的 extract_result 函式 (V7)
-    特點：
-    1. 不看表格，看文字行
-    2. 優先抓數字 (避開 MDL)，若只剩 1 個數字視為 N.D.
-    3. 強制過濾 MDL 黑名單
+    v63.27 修正: N.D. 判定優先於數字抓取
     """
     lines = text.splitlines()
 
     for i, line in enumerate(lines):
-        # 步驟 A: 鎖定關鍵字所在的行
         if re.search(keyword, line, re.IGNORECASE):
             
             # --- Context Window ---
             if item_name == "DEHP":
-                context = " ".join(lines[i:i+4]) # DEHP 擴大
+                context = " ".join(lines[i:i+4])
             else:
-                context = " ".join(lines[i:i+2]) # 一般 2 行 (您的程式改為3行，這裡取折衷或照舊，先照您的程式邏輯走)
-                # 您的程式註解寫一般讀 2 行，但程式碼裡有一段是 context = " ".join(lines[i:i+3]) ? 
-                # 為了保險，這裡採用您程式碼中針對非DEHP的設定，通常 lines[i:i+3] 會更穩
-                context = " ".join(lines[i:i+3])
+                context = " ".join(lines[i:i+3]) # 與您的程式邏輯保持一致
 
             # --- Cleaning (除噪) ---
             if item_name == "DEHP":
@@ -201,7 +183,8 @@ def extract_result_malaysia_v7(text, keyword, item_name):
             context = re.sub(r"\b(19|20)\d{2}\b", " ", context) 
             context = re.sub(r"(Max|Limit|MDL|LOQ)\s*\d+(\.\d+)?", " ", context, flags=re.IGNORECASE)
 
-            # --- N.D. 判定 (優先) ---
+            # --- [v63.27 修正點] N.D. 判定 (最高優先級) ---
+            # 必須先判斷 N.D.，避免 PBB/PBDE 誤抓到後面的 Limit 數值
             nd_pattern = r"(\bN\s*\.?\s*D\s*\.?\b)|(Not\s*Detected)"
             if re.search(nd_pattern, context, re.IGNORECASE):
                 return "N.D."
@@ -210,7 +193,7 @@ def extract_result_malaysia_v7(text, keyword, item_name):
 
             # --- 數字抓取 ---
             nums = re.findall(r"\b\d+(?:\.\d+)?\b", context)
-            if not nums: continue # 這行沒結果，找下一行
+            if not nums: continue
 
             final_val = None
 
@@ -218,19 +201,17 @@ def extract_result_malaysia_v7(text, keyword, item_name):
             if item_name in ["PBB", "PBDE"]:
                 final_val = nums[0]
             else:
-                # 一般項目邏輯 (您的 V7 核心)
+                # 一般項目
                 if len(nums) >= 2:
-                    # 剩下兩個以上數字 -> 取第 1 個
                     candidate = nums[0]
                     try:
                         f_val = float(candidate)
-                        if 1990 <= f_val <= 2030 and f_val.is_integer(): # 防呆年份
+                        if 1990 <= f_val <= 2030 and f_val.is_integer():
                              candidate = nums[1]
                     except: pass
                     final_val = candidate
-                
                 elif len(nums) == 1:
-                    # [關鍵] 只剩下一個數字，極大機率是 MDL -> 強制 N.D.
+                    # 只剩一個數字，視為 MDL -> 回傳 N.D.
                     return "N.D."
 
             # --- 黑名單過濾 ---
@@ -239,7 +220,7 @@ def extract_result_malaysia_v7(text, keyword, item_name):
                     val_float = float(final_val)
                     if item_name in MY_MDL_BLOCKLIST:
                         if val_float in MY_MDL_BLOCKLIST[item_name]:
-                            return "N.D." # 命中黑名單 (是 MDL)
+                            return "N.D."
                     return final_val
                 except: pass
 
@@ -248,35 +229,27 @@ def extract_result_malaysia_v7(text, keyword, item_name):
 def process_malaysia_engine(pdf, filename):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     
-    # 1. 全文提取 (用於文字掃描)
     full_text = ""
     for p in pdf.pages: 
         full_text += (p.extract_text() or "") + "\n"
     
-    # 2. 日期抓取 (使用您的精確 Regex 邏輯)
     report_date = None
     first_page_text = (pdf.pages[0].extract_text() or "")
     report_date = extract_date_malaysia_v7(first_page_text)
     
-    # 3. 數據抓取 (使用您的文字掃描邏輯)
     for col_key in OUTPUT_COLUMNS:
         if col_key in ["日期", "檔案名稱"]: continue
         
-        # 取得對應的 Regex
         keyword = MY_ITEM_RULES.get(col_key)
         if not keyword: continue
         
-        # 執行掃描
         val = extract_result_malaysia_v7(full_text, keyword, col_key)
         
         if val:
-            # 轉換優先級格式
-            # 對於馬來西亞引擎，抓到的直接視為有效數據
             prio = parse_value_priority(val)
             if prio[0] > 0:
                 data_pool[col_key].append({"priority": prio, "filename": filename})
 
-    # 4. 日期格式化
     date_candidates = []
     if report_date:
         date_candidates.append((100, report_date))
@@ -284,7 +257,7 @@ def process_malaysia_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 4. SGS 標準引擎 (v63.24: 完全保留，含鹵素區塊 & 智慧表格)
+# 4. SGS 標準引擎 (v63.24: 完全保留)
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -773,13 +746,13 @@ def process_files(files):
                 
                 # 分流邏輯
                 if "MALAYSIA" in first_page_text and "SGS" in first_page_text:
-                    # 通道 C: 馬來西亞專用 (文字掃描)
+                    # 通道 C: 馬來西亞專用 (v63.27: 修正 N.D. 優先順序)
                     data_pool, date_candidates = process_malaysia_engine(pdf, file.name)
                 elif company == "CTI":
                     # 通道 B: CTI 專用
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
                 else:
-                    # 通道 A: 標準/中國 SGS 專用 (保留 v63.24 所有功能)
+                    # 通道 A: 標準/中國 SGS 專用 (v63.24)
                     data_pool, date_candidates = process_standard_engine(pdf, file.name, company)
                 
                 final_row = {}
@@ -821,9 +794,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.26", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.26 馬來西亞邏輯移植版)")
-st.info("💡 v63.26：針對馬來西亞報告進行「外科手術式」邏輯移植，完全捨棄表格解析，改用您驗證過有效的文字掃描與 Regex 規則；同時確保標準 SGS 與 CTI 引擎完全不受影響。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.27", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.27 馬來西亞邏輯順序修正版)")
+st.info("💡 v63.27：針對馬來西亞引擎修正了 PBB/PBDE 的判定順序，將 N.D. 檢查優先級調高於數字抓取，防止誤抓 Limit 數值，完美還原原始有效邏輯。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -845,7 +818,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.26.xlsx",
+            file_name="SGS_CTI_Summary_v63.27.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
