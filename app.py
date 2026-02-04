@@ -29,7 +29,7 @@ SIMPLE_KEYWORDS = {
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
     "BR": ["Bromine", "溴"],
-    "I": ["Iodine", "碘", "lodine"] # v63.22/23: 包含 lodine 處理 OCR 錯誤
+    "I": ["Iodine", "碘", "lodine"] # v63.22: 包含 lodine (OCR錯誤)
 }
 
 GROUP_KEYWORDS = {
@@ -140,7 +140,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 3. 引擎 A: 標準引擎 (Standard Engine) - v63.23 終極容錯版
+# 3. 引擎 A: 標準引擎 (Standard Engine) - v63.24 鹵素專區版
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -214,7 +214,7 @@ def identify_columns_v60(table, company):
                 if mdl_idx == -1: mdl_idx = c_idx
             
             if company == "SGS":
-                 # v63.23 Fix: Regex 支援大小寫 (A.C006)
+                 # v63.23: Regex 支援大小寫
                  if ("result" in txt or "結果" in txt or "结果" in txt or re.search(r"00[1-9]", txt) or 
                     re.search(r"^[a-zA-Z]?\s*\.?\s*[a-zA-Z]?\d+", txt) or re.search(r"[a-zA-Z]\s*\.\s*[a-zA-Z]\d+", txt) or "no." in txt):
                     if "cas" not in txt and "method" not in txt and "limit" not in txt:
@@ -323,6 +323,47 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
                 elif matched_group:
                     file_group_data[matched_group].append(priority)
 
+# v63.24 New Feature: 鹵素專用區塊搜索
+def process_halogen_block(pdf, filename, data_pool):
+    for page in pdf.pages:
+        text = (page.extract_text() or "").lower()
+        # 尋找錨點
+        if "halogen" in text:
+            tables = page.extract_tables()
+            for table in tables:
+                if not table or len(table) < 2: continue
+                
+                # 強制掃描該表格的每一行
+                for row in table:
+                    clean_row = [clean_text(cell) for cell in row]
+                    row_txt = "".join(clean_row).lower()
+                    
+                    # 辨識項目
+                    matched_key = None
+                    if "fluorine" in row_txt: matched_key = "F"
+                    elif "chlorine" in row_txt: matched_key = "CL"
+                    elif "bromine" in row_txt: matched_key = "BR"
+                    elif "iodine" in row_txt or "lodine" in row_txt: matched_key = "I"
+                    
+                    if matched_key:
+                        # 在該行尋找結果
+                        result_val = ""
+                        for cell in reversed(clean_row):
+                            c_lower = cell.lower()
+                            if "mg/kg" in c_lower or "ppm" in c_lower or "limit" in c_lower or "unit" in c_lower: continue
+                            if "nd" in c_lower or "n.d." in c_lower:
+                                result_val = cell
+                                break
+                            if re.search(r"^\d+(\.\d+)?", cell):
+                                if is_suspicious_limit_value(cell): continue
+                                result_val = cell
+                                break
+                        
+                        if result_val:
+                            priority = parse_value_priority(result_val)
+                            if priority[0] > 0:
+                                data_pool[matched_key].append({"priority": priority, "filename": filename})
+
 def process_standard_engine(pdf, filename, company):
     data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
     file_dates_candidates = []
@@ -346,15 +387,14 @@ def process_standard_engine(pdf, filename, company):
             
             item_idx, result_idx, is_skip, mdl_idx = identify_columns_v60(table, company)
             
-            # v63.23 Fix: 暴力掃描模式 (Force Scan Mode)
-            # 如果判定為 skip，但表格內文包含鹵素關鍵字，則強制掃描
+            # 暴力掃描 (Fallback)
             force_scan = False
             if is_skip:
                 table_str = str(table).lower()
                 if any(k in table_str for k in ["fluorine", "chlorine", "bromine", "iodine", "lodine"]):
                     force_scan = True
                     is_skip = False
-                    if item_idx == -1: item_idx = 0 # 預設第0欄為項目
+                    if item_idx == -1: item_idx = 0
 
             if is_skip: continue
             
@@ -364,7 +404,6 @@ def process_standard_engine(pdf, filename, company):
                 
                 rows_to_process = []
                 
-                # 強力拆行清洗
                 if "\n" in raw_item_cell:
                     split_items = [x.strip() for x in raw_item_cell.split('\n') if x.strip()]
                     if "\n" in raw_result_cell:
@@ -406,7 +445,6 @@ def process_standard_engine(pdf, filename, company):
                     if result_idx != -1 and result_idx < len(clean_row):
                         result = clean_row[result_idx]
                     
-                    # v63.23 Fix: 暴力行內掃描 (如果 Result 沒定位到)
                     if result == "" and force_scan:
                         for cell in reversed(clean_row):
                             c_lower = cell.lower()
@@ -437,7 +475,6 @@ def process_standard_engine(pdf, filename, company):
 
                     for target_key, keywords in SIMPLE_KEYWORDS.items():
                         if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
-                        
                         if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
                         if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
                         if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
@@ -446,7 +483,6 @@ def process_standard_engine(pdf, filename, company):
                             if kw.lower() in item_name_lower:
                                 if target_key == "PFOS" and "related" in item_name_lower: continue 
                                 data_pool[target_key].append({"priority": priority, "filename": filename})
-                                # v63.20 Fix: 確保無 break
                     
                     for group_key, keywords in GROUP_KEYWORDS.items():
                         for kw in keywords:
@@ -454,7 +490,11 @@ def process_standard_engine(pdf, filename, company):
                                 file_group_data[group_key].append(priority)
                                 break
 
-    # Text Rescue (SGS Only)
+    # v63.24 New Feature: 若鹵素數據仍缺失，啟動專用區塊搜索
+    if not (data_pool["F"] and data_pool["CL"] and data_pool["BR"] and data_pool["I"]):
+        process_halogen_block(pdf, filename, data_pool)
+
+    # Text Rescue
     if company == "SGS":
         missing_targets = []
         pb_data = [d for d in data_pool["Pb"] if d['filename'] == filename]
@@ -614,7 +654,7 @@ def process_malaysia_engine(pdf, filename):
     
     date_candidates = extract_dates_v63_13_global(text_for_dates)
     
-    # 2. 移植 v63.23 標準引擎表格邏輯 (含大小寫Regex與暴力掃描)
+    # 2. 移植 v63.23 標準引擎表格邏輯 (含 ND 格式解放)
     company = "SGS" 
     file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
 
@@ -623,17 +663,8 @@ def process_malaysia_engine(pdf, filename):
         for table in tables:
             if not table or len(table) < 2: continue
             
+            # 使用增強版的 identify_columns_v60
             item_idx, result_idx, is_skip, mdl_idx = identify_columns_v60(table, company)
-            
-            # v63.23 Fix: 移植暴力掃描
-            force_scan = False
-            if is_skip:
-                table_str = str(table).lower()
-                if any(k in table_str for k in ["fluorine", "chlorine", "bromine", "iodine", "lodine"]):
-                    force_scan = True
-                    is_skip = False
-                    if item_idx == -1: item_idx = 0
-
             if is_skip: continue
             
             for row in table:
@@ -684,19 +715,6 @@ def process_malaysia_engine(pdf, filename):
                     if result_idx != -1 and result_idx < len(clean_row):
                         result = clean_row[result_idx]
                     
-                    # v63.23 Fix: 移植暴力掃描
-                    if result == "" and force_scan:
-                        for cell in reversed(clean_row):
-                            c_lower = cell.lower()
-                            if "mg/kg" in c_lower or "ppm" in c_lower: continue
-                            if "nd" in c_lower or "n.d." in c_lower:
-                                result = cell
-                                break
-                            if re.search(r"^\d+(\.\d+)?", cell):
-                                if is_suspicious_limit_value(cell): continue
-                                result = cell
-                                break
-
                     temp_priority = parse_value_priority(result)
                     if temp_priority[0] == 0:
                         for cell in reversed(clean_row):
@@ -730,6 +748,10 @@ def process_malaysia_engine(pdf, filename):
                             if kw.lower() in item_name_lower:
                                 file_group_data[group_key].append(priority)
                                 break
+
+    # v63.24: 馬來西亞引擎也啟用鹵素專用區塊
+    if not (data_pool["F"] and data_pool["CL"] and data_pool["BR"] and data_pool["I"]):
+        process_halogen_block(pdf, filename, data_pool)
 
     for group_key, values in file_group_data.items():
         if values:
@@ -799,9 +821,9 @@ def find_report_start_page(pdf):
 # 7. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.23", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.23 終極容錯版)")
-st.info("💡 v63.23：修復了 Regex 大小寫敏感問題 (解決 A.C006)，並引入暴力行內掃描 (Force Row Scan)，確保即使欄位定位失敗，只要數據存在就能被抓取。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.24", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.24 鹵素專用區塊搜索版)")
+st.info("💡 v63.24：新增「鹵素專用區塊搜索 (Halogen Anchor Search)」，利用章節標題精準鎖定並強制解析無鹵表格，無視表格結構異常，徹底解決 SGS 報告漏抓問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -823,7 +845,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.23.xlsx",
+            file_name="SGS_CTI_Summary_v63.24.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
