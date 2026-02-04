@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 
 # =============================================================================
-# 1. 關鍵字庫定義 (完全隔離)
+# 1. [Core 1] v63.15 經典關鍵字庫 (給 CTI & 標準 SGS 使用)
 # =============================================================================
 
 OUTPUT_COLUMNS = [
@@ -16,8 +16,8 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
-# --- [Group B] 標準 SGS / CTI 用的關鍵字 (v63.15 大全配版本) ---
-STD_SIMPLE_KEYWORDS = {
+# 恢復 v63.15 的設定：包含 PFOS 短字串，且不設排除邏輯
+SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "鉛", "Pb"],
     "Cd": ["Cadmium", "鎘", "Cd"],
     "Hg": ["Mercury", "汞", "Hg"],
@@ -26,7 +26,6 @@ STD_SIMPLE_KEYWORDS = {
     "BBP": ["BBP", "Butyl benzyl phthalate"],
     "DBP": ["DBP", "Dibutyl phthalate"],
     "DIBP": ["DIBP", "Diisobutyl phthalate"],
-    # v63.32: 恢復 v63.15 的 PFOS 定義，包含短關鍵字，且後續代碼不設過濾
     "PFOS": ["Perfluorooctane sulfonates", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid", "全氟辛烷磺酸", "Perfluorooctane Sulfonamide", "PFOS and its salts", "PFOS 及其盐", "PFOS"],
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
@@ -34,8 +33,8 @@ STD_SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "lodine"]
 }
 
-STD_GROUP_KEYWORDS = {
-    # v63.32: 恢復 v63.15 的完整單項清單，確保 CTI 每一行都能被識別
+# 恢復 v63.15 的設定：包含所有單項 PBB/PBDE，確保 CTI 能識別
+GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和", "多溴聯苯之和",
         "Polybromobiphenyl", "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
@@ -57,10 +56,13 @@ STD_GROUP_KEYWORDS = {
     ]
 }
 
-PFAS_KEYWORDS = ["Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質"]
-MSDS_KEYWORDS = ["content", "composition", "concentration", "含量", "成分"]
+PFAS_SUMMARY_KEYWORDS = ["Per- and Polyfluoroalkyl Substances", "PFAS", "全氟/多氟烷基物質"]
+MSDS_HEADER_KEYWORDS = ["content", "composition", "concentration", "含量", "成分"]
 
-# --- [Group A] 馬來西亞專用 Regex 映射 (v63.28 版本) ---
+# =============================================================================
+# 2. [Core 2] v63.28 馬來西亞專用設定 (完全隔離)
+# =============================================================================
+
 MY_ITEM_RULES = {
     "Pb": r"Lead\s*\(Pb\)",
     "Cd": r"Cadmium\s*\(Cd\)",
@@ -94,7 +96,7 @@ MONTH_MAP = {
 }
 
 # =============================================================================
-# 2. 共用輔助函式
+# 3. 共用輔助函式
 # =============================================================================
 
 def clean_text(text):
@@ -113,9 +115,6 @@ def is_suspicious_limit_value(val):
     except: return False
 
 def parse_value_priority(value_str):
-    """
-    通用優先級解析 (主要給 Standard Engine 使用)
-    """
     raw_val = clean_text(value_str)
     if "(" in raw_val and ")" in raw_val:
         if re.search(r"\(\d+\)", raw_val):
@@ -153,7 +152,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 3. [平行時空 A] SGS 馬來西亞專用引擎 (v63.28 核心)
+# 4. [Core 2] SGS 馬來西亞專用引擎 (v63.28 邏輯)
 # =============================================================================
 
 def extract_date_malaysia_v7(text):
@@ -247,11 +246,10 @@ def process_malaysia_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 4. [平行時空 B] CTI 專用引擎 (v63.15 復刻版)
+# 5. [Core 1] CTI 專用引擎 (v63.15 復刻: MDL 錨點法 + 無過濾)
 # =============================================================================
 
 def extract_dates_v63_13_global(text):
-    """CTI 的日期格式較亂，使用全域串流分析 (保留原有效邏輯)"""
     candidates = []
     poison_kw = ["received", "receive", "expiry", "valid", "process"]
     backup_kw = ["testing", "period", "test"]
@@ -292,19 +290,20 @@ def process_cti_engine(pdf, filename):
         for table in tables:
             if not table or len(table) < 2: continue
             
-            # v63.15 經典 MDL 錨點定位法
+            # v63.15 核心邏輯：MDL 錨點定位法
+            # 這能解決 BBP 抓到 Limit (1000) 的問題
             mdl_col_idx = -1
             item_col_idx = -1
             cols = len(table[0])
             
-            # 1. 尋找 MDL 欄位 (特徵：數字佔比高，或表頭有 MDL)
+            # 1. 尋找 MDL 欄位
             for c in range(cols):
                 header = clean_text(table[0][c]).lower()
                 if "mdl" in header or "loq" in header:
                     mdl_col_idx = c
                     break
             
-            # 若無表頭，用內容判斷
+            # 若無表頭，用內容特徵判斷 (CTI 常見 MDL 數值)
             if mdl_col_idx == -1:
                 for c in range(cols):
                     num_count = 0
@@ -318,9 +317,9 @@ def process_cti_engine(pdf, filename):
                         mdl_col_idx = c
                         break
             
-            if mdl_col_idx == -1: continue # 找不到 MDL 欄，跳過此表
+            if mdl_col_idx == -1: continue 
 
-            # 2. 結果欄位通常在 MDL 的左邊
+            # 2. 結果欄位 (MDL 左邊)
             result_col_idx = mdl_col_idx - 1
             if result_col_idx < 0: continue
 
@@ -332,23 +331,23 @@ def process_cti_engine(pdf, filename):
                     break
             if item_col_idx == -1: item_col_idx = 0
 
-            # 4. 逐行掃描
+            # 4. 掃描
             for row in table:
                 if len(row) <= mdl_col_idx: continue
                 item_text = clean_text(row[item_col_idx]).lower()
                 
-                # 直接取錨點欄位的內容
+                # 直接取錨點欄位的內容，解決 BBP 抓錯問題
                 raw_result = clean_text(row[result_col_idx])
                 prio = parse_value_priority(raw_result)
                 if prio[0] == 0: continue
 
-                # 關鍵字匹配 (v63.15 無過濾風格)
-                for key, kws in STD_SIMPLE_KEYWORDS.items():
+                # 關鍵字匹配 (v63.15 無過濾風格，解決 PFOS 漏抓)
+                for key, kws in SIMPLE_KEYWORDS.items():
                     if any(kw.lower() in item_text for kw in kws):
                         data_pool[key].append({"priority": prio, "filename": filename})
                         break
                 
-                for key, kws in STD_GROUP_KEYWORDS.items():
+                for key, kws in GROUP_KEYWORDS.items():
                     if any(kw.lower() in item_text for kw in kws):
                         data_pool[key].append({"priority": prio, "filename": filename})
                         break
@@ -356,7 +355,7 @@ def process_cti_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 5. [平行時空 B] SGS 標準引擎 (v63.24 + v63.15 關鍵字)
+# 6. [Core 1] SGS 標準引擎 (v63.15 + v63.24 混合)
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -406,7 +405,7 @@ def identify_columns_v60(table, company):
     for r in range(max_scan_rows):
         full_header_text += " ".join([str(c).lower() for c in table[r] if c]) + " "
     is_msds_table = False
-    if any(k in full_header_text for k in MSDS_KEYWORDS) and "result" not in full_header_text: is_msds_table = True
+    if any(k in full_header_text for k in MSDS_HEADER_KEYWORDS) and "result" not in full_header_text: is_msds_table = True
 
     for r_idx in range(max_scan_rows):
         row = table[r_idx]
@@ -476,10 +475,10 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         line_clean = clean_text(line)
         line_lower = line_clean.lower()
         if not line_clean: continue
-        if any(bad in line_lower for bad in MSDS_KEYWORDS): continue
+        if any(bad in line_lower for bad in MSDS_HEADER_KEYWORDS): continue
 
         matched_simple = None
-        for key, keywords in STD_SIMPLE_KEYWORDS.items():
+        for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
             if key == "Cd" and any(bad in line_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue 
             if key == "F" and any(bad in line_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
@@ -493,7 +492,7 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         
         matched_group = None
         if not matched_simple:
-            for group_key, keywords in STD_GROUP_KEYWORDS.items():
+            for group_key, keywords in GROUP_KEYWORDS.items():
                 if targets and group_key not in targets: continue
                 for kw in keywords:
                     if kw.lower() in line_lower:
@@ -540,7 +539,7 @@ def process_standard_engine(pdf, filename, company):
         full_text_content += txt + "\n"
         file_dates_candidates.extend(extract_dates_v60(txt))
 
-    file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()} # Use global keys for groups
+    file_group_data = {key: [] for key in GROUP_KEYWORDS.keys()}
 
     for page in pdf.pages:
         tables = page.extract_tables()
@@ -629,7 +628,7 @@ def process_standard_engine(pdf, filename, company):
                     priority = parse_value_priority(result)
                     if priority[0] == 0: continue
 
-                    for target_key, keywords in STD_SIMPLE_KEYWORDS.items():
+                    for target_key, keywords in SIMPLE_KEYWORDS.items():
                         if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
                         if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
                         if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
@@ -640,7 +639,7 @@ def process_standard_engine(pdf, filename, company):
                                 if target_key == "PFOS" and "related" in item_name_lower: continue 
                                 data_pool[target_key].append({"priority": priority, "filename": filename})
                     
-                    for group_key, keywords in STD_GROUP_KEYWORDS.items():
+                    for group_key, keywords in GROUP_KEYWORDS.items():
                         for kw in keywords:
                             if kw.lower() in item_name_lower:
                                 file_group_data[group_key].append(priority)
@@ -675,7 +674,7 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 6. 主程式與分流器
+# 7. 主程式與分流器
 # =============================================================================
 
 def process_files(files):
@@ -688,14 +687,15 @@ def process_files(files):
                 first_page_text = (pdf.pages[0].extract_text() or "").upper()
                 company = identify_company(first_page_text)
                 
+                # 分流邏輯
                 if "MALAYSIA" in first_page_text and "SGS" in first_page_text:
-                    # 通道 A: 馬來西亞 (v63.28 核心)
+                    # 通道 A: 馬來西亞 (v63.28 核心 - 文字掃描)
                     data_pool, date_candidates = process_malaysia_engine(pdf, file.name)
                 elif company == "CTI":
-                    # 通道 B: CTI (v63.15 核心 - MDL錨點法)
+                    # 通道 B: CTI (v63.15 復刻 - MDL 錨點定位法)
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
                 else:
-                    # 通道 B: 標準 SGS (v63.15/24 混合 - 無過濾)
+                    # 通道 C: 標準 SGS (v63.24 + v63.15 關鍵字)
                     data_pool, date_candidates = process_standard_engine(pdf, file.name, company)
                 
                 final_row = {}
@@ -733,12 +733,12 @@ def find_report_start_page(pdf):
     return 0
 
 # =============================================================================
-# 7. UI
+# 8. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.32", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.32 時光倒流與平行時空版)")
-st.info("💡 v63.32：CTI 引擎與標準 SGS 引擎完全回滾至 v63.15 邏輯（MDL 錨點定位、無過濾關鍵字），修復了 PFOS 漏抓與 BBP 抓錯問題；馬來西亞引擎則維持獨立的 v63.28 文字掃描邏輯。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.33", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.33 雙核心終極修復版)")
+st.info("💡 v63.33：修正了關鍵字變數名稱導致的崩潰錯誤，並實作雙核心架構：核心一（復刻 v63.15）負責完美處理 CTI/標準 SGS，核心二（外掛 v63.28）專門處理馬來西亞報告。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -760,7 +760,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.32.xlsx",
+            file_name="SGS_CTI_Summary_v63.33.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
