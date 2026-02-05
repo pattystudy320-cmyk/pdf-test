@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 
 # =============================================================================
-# 1. [Core 1] v63.15 經典關鍵字庫 (給 CTI & 標準 SGS 使用)
+# 1. [Core 1] v63.39 繁簡通用關鍵字庫 (給 CTI & 標準 SGS 使用)
 # =============================================================================
 
 OUTPUT_COLUMNS = [
@@ -16,16 +16,16 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
-# v63.15 設定：包含 PFOS 短關鍵字
+# v63.39: 補齊簡體中文關鍵字 (如：联/聯, 价/價)
 SIMPLE_KEYWORDS = {
-    "Pb": ["Lead", "鉛", "Pb"],
-    "Cd": ["Cadmium", "鎘", "Cd"],
+    "Pb": ["Lead", "鉛", "铅", "Pb"],
+    "Cd": ["Cadmium", "鎘", "镉", "Cd"],
     "Hg": ["Mercury", "汞", "Hg"],
-    "Cr6+": ["Hexavalent Chromium", "六價鉻", "Cr(VI)", "Chromium VI", "Hexavalent Chromium"],
-    "DEHP": ["DEHP", "Di(2-ethylhexyl) phthalate", "Bis(2-ethylhexyl) phthalate"],
-    "BBP": ["BBP", "Butyl benzyl phthalate"],
-    "DBP": ["DBP", "Dibutyl phthalate"],
-    "DIBP": ["DIBP", "Diisobutyl phthalate"],
+    "Cr6+": ["Hexavalent Chromium", "六價鉻", "六价铬", "Cr(VI)", "Chromium VI"],
+    "DEHP": ["DEHP", "Di(2-ethylhexyl) phthalate", "Bis(2-ethylhexyl) phthalate", "邻苯二甲酸二(2-乙基己基)酯"],
+    "BBP": ["BBP", "Butyl benzyl phthalate", "邻苯二甲酸丁苄酯"],
+    "DBP": ["DBP", "Dibutyl phthalate", "邻苯二甲酸二丁酯"],
+    "DIBP": ["DIBP", "Diisobutyl phthalate", "邻苯二甲酸二异丁酯"],
     "PFOS": ["Perfluorooctane sulfonates", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid", "全氟辛烷磺酸", "Perfluorooctane Sulfonamide", "PFOS and its salts", "PFOS 及其盐", "PFOS"],
     "F": ["Fluorine", "氟"],
     "CL": ["Chlorine", "氯"],
@@ -33,10 +33,11 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "lodine"]
 }
 
-# v63.15 設定：包含所有單項 PBB/PBDE
+# v63.39: PBB/PBDE 補齊簡體中文 (联/醚)
 GROUP_KEYWORDS = {
     "PBB": [
-        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", "多溴聯苯總和", "多溴聯苯之和",
+        "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", 
+        "多溴聯苯總和", "多溴聯苯之和", "多溴联苯总和", "多溴联苯之和", "多溴联苯",
         "Polybromobiphenyl", "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
         "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
         "Heptabromobiphenyl", "Octabromobiphenyl", "Nonabromobiphenyl", 
@@ -45,7 +46,8 @@ GROUP_KEYWORDS = {
         "Octabrominated", "Nonabrominated", "Decabrominated"
     ],
     "PBDE": [
-        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", "多溴聯苯醚總和", "多溴二苯醚之和",
+        "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", 
+        "多溴聯苯醚總和", "多溴二苯醚之和", "多溴二苯醚总和", "多溴二苯醚",
         "Polybromodiphenyl ether", "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
@@ -254,7 +256,7 @@ def process_malaysia_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 5. [Core 1] CTI 專用引擎 (v63.36 修正)
+# 5. [Core 1] CTI 專用引擎 (v63.36 修正: 日期權重 + BR豁免 + MaxRule)
 # =============================================================================
 
 def extract_dates_v63_13_global(text):
@@ -664,7 +666,7 @@ def process_standard_engine(pdf, filename, company):
                                 break
 
                     # [v63.37] 總和行強制無條件掃描
-                    is_sum_row = "sum of" in item_name_lower or "之和" in item_name_lower
+                    is_sum_row = "sum of" in item_name_lower or "之和" in item_name_lower or "总和" in item_name_lower
                     if is_sum_row:
                          result = "" 
                          for cell in reversed(clean_row):
@@ -814,9 +816,9 @@ def find_report_start_page(pdf):
 # 8. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.38", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.38 總和行免死金牌版)")
-st.info("💡 v63.38：\n1. 針對 SGS 簡體版 PBB/PBDE 總和行，完全豁免 MDL 數值排除檢查，防止抓到的 ND 被誤殺。\n2. 保留所有 CTI 與 SGS 日期、數值格式修正。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.39", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.39 繁簡通吃終極修正版)")
+st.info("💡 v63.39：補齊 PBB/PBDE 等關鍵字庫的簡體中文支援 (如「联苯」)，解決 SGS 簡體報告抓取問題。同時保留所有日期權重、數值修正與總和行保護邏輯。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -838,7 +840,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.38.xlsx",
+            file_name="SGS_CTI_Summary_v63.39.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
