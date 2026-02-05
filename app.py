@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 
 # =============================================================================
-# 1. [Core 1] v63.39 繁簡通用關鍵字庫 (給 CTI & 標準 SGS 使用)
+# 1. [Core 1] v63.43 繁簡韓通用關鍵字庫 (給 CTI & 標準 SGS & Intertek)
 # =============================================================================
 
 OUTPUT_COLUMNS = [
@@ -16,45 +16,47 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
-# v63.39: 補齊簡體中文關鍵字
+# v63.43: 補齊簡體中文、韓文及縮寫關鍵字
 SIMPLE_KEYWORDS = {
-    "Pb": ["Lead", "鉛", "铅", "Pb"],
-    "Cd": ["Cadmium", "鎘", "镉", "Cd"],
-    "Hg": ["Mercury", "汞", "Hg"],
-    "Cr6+": ["Hexavalent Chromium", "六價鉻", "六价铬", "Cr(VI)", "Chromium VI"],
+    "Pb": ["Lead", "鉛", "铅", "Pb", "납"],
+    "Cd": ["Cadmium", "鎘", "镉", "Cd", "카드뮴"],
+    "Hg": ["Mercury", "汞", "Hg", "수은"],
+    "Cr6+": ["Hexavalent Chromium", "六價鉻", "六价铬", "Cr(VI)", "Chromium VI", "6가 크롬"],
     "DEHP": ["DEHP", "Di(2-ethylhexyl) phthalate", "Bis(2-ethylhexyl) phthalate", "邻苯二甲酸二(2-乙基己基)酯"],
     "BBP": ["BBP", "Butyl benzyl phthalate", "邻苯二甲酸丁苄酯"],
     "DBP": ["DBP", "Dibutyl phthalate", "邻苯二甲酸二丁酯"],
     "DIBP": ["DIBP", "Diisobutyl phthalate", "邻苯二甲酸二异丁酯"],
     "PFOS": ["Perfluorooctane sulfonates", "Perfluorooctane sulfonate", "Perfluorooctane sulfonic acid", "全氟辛烷磺酸", "Perfluorooctane Sulfonamide", "PFOS and its salts", "PFOS 及其盐", "PFOS"],
-    "F": ["Fluorine", "氟"],
-    "CL": ["Chlorine", "氯"],
-    "BR": ["Bromine", "溴"],
-    "I": ["Iodine", "碘", "lodine"]
+    "F": ["Fluorine", "氟", "불소"],
+    "CL": ["Chlorine", "氯", "염소"],
+    "BR": ["Bromine", "溴", "브롬"],
+    "I": ["Iodine", "碘", "lodine", "요오드"]
 }
 
-# v63.39: PBB/PBDE 補齊簡體中文
+# v63.43: PBB/PBDE 補齊簡體、韓文及 Intertek 縮寫 (MonoBB, etc.)
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", 
-        "多溴聯苯總和", "多溴聯苯之和", "多溴联苯总和", "多溴联苯之和", "多溴联苯",
+        "多溴聯苯總和", "多溴聯苯之和", "多溴联苯总和", "多溴联苯之和", "多溴联苯", "폴리브롬화비페닐",
         "Polybromobiphenyl", "Monobromobiphenyl", "Dibromobiphenyl", "Tribromobiphenyl", 
         "Tetrabromobiphenyl", "Pentabromobiphenyl", "Hexabromobiphenyl", 
         "Heptabromobiphenyl", "Octabromobiphenyl", "Nonabromobiphenyl", 
         "Decabromobiphenyl", "Monobrominated", "Dibrominated", "Tribrominated", 
         "Tetrabrominated", "Pentabrominated", "Hexabrominated", "Heptabrominated", 
-        "Octabrominated", "Nonabrominated", "Decabrominated"
+        "Octabrominated", "Nonabrominated", "Decabrominated",
+        "MonoBB", "DiBB", "TriBB", "TetraBB", "PentaBB", "HexaBB", "HeptaBB", "OctaBB", "NonaBB", "DecaBB"
     ],
     "PBDE": [
         "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", 
-        "多溴聯苯醚總和", "多溴二苯醚之和", "多溴二苯醚總和", "多溴二苯醚",
+        "多溴聯苯醚總和", "多溴二苯醚之和", "多溴二苯醚總和", "多溴二苯醚", "폴리브롬화디페닐에테르",
         "Polybromodiphenyl ether", "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
         "Decabromodiphenyl ether", "Monobrominated Diphenyl", "Dibrominated Diphenyl", "Tribrominated Diphenyl",
         "Tetrabrominated Diphenyl", "Pentabrominated Diphenyl", "Hexabrominated Diphenyl",
         "Heptabrominated Diphenyl", "Octabrominated Diphenyl", "Nonabrominated Diphenyl",
-        "Decabrominated Diphenyl"
+        "Decabrominated Diphenyl",
+        "MonoBDE", "DiBDE", "TriBDE", "TetraBDE", "PentaBDE", "HexaBDE", "HeptaBDE", "OctaBDE", "NonaBDE", "DecaBDE"
     ]
 }
 
@@ -741,19 +743,18 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 7. [Core 3] Intertek 專用引擎 (v63.42 修正: PBDE救援/清洗/日期)
+# 7. [Core 3] Intertek 專用引擎 (v63.43 修正: 韓文版 + PBB/PBDE反推)
 # =============================================================================
 
 def clean_intertek_value(val):
     if not val: return ""
-    # v63.42 Fix: 移除括號及內容 (如 #2), 只保留數字
     cleaned = re.sub(r'\s*\(.*?\)', '', val)
     return cleaned.strip()
 
 def extract_intertek_dates(text):
     candidates = []
     poison_kw = ["received", "receive", "expiry", "valid", "process", "testing period", "检测日期", "接收日期", "date test started", "date job applied"]
-    bonus_kw = ["issue date"] # v63.42: 高權重
+    bonus_kw = ["issue date"] 
     
     clean_text_str = re.sub(r'[^a-z0-9]', ' ', text.lower())
     tokens = clean_text_str.split()
@@ -794,7 +795,8 @@ def process_intertek_engine(pdf, filename):
     # 2. 日期抓取
     date_candidates = extract_intertek_dates(full_text_content[:2000])
 
-    has_pbde_sub_nd = False # PBDE 子項目救援旗標
+    has_pbde_sub_nd = False
+    has_pbb_sub_nd = False # [v63.43 Fix] PBB 子項目救援旗標
 
     # 3. 表格掃描
     for page in pdf.pages:
@@ -814,7 +816,7 @@ def process_intertek_engine(pdf, filename):
             
             for c in range(cols):
                 header = str(table[0][c]).lower()
-                if "test item" in header or "測試項目" in header:
+                if "test item" in header or "測試項目" in header or "시험항목" in header:
                     item_col_idx = c
                     break
             if item_col_idx == -1: item_col_idx = 0
@@ -822,7 +824,7 @@ def process_intertek_engine(pdf, filename):
             result_col_idx = -1
             for c in range(cols):
                 header = str(table[0][c]).lower()
-                if "result" in header or "結果" in header or "submitted samples" in header:
+                if "result" in header or "結果" in header or "submitted samples" in header or "시험결과" in header:
                     result_col_idx = c
                     break
             
@@ -834,15 +836,15 @@ def process_intertek_engine(pdf, filename):
                 item_text_raw = clean_text(row[item_col_idx])
                 item_text_lower = item_text_raw.lower()
                 
-                # [v63.42 Fix] PBDE 救援 Plan A: 跨行偷看
+                # PBDE/PBB 總和行判斷 (英文)
                 is_pb_sum = "polybrominated" in item_text_lower and ("biphenyls" in item_text_lower or "ether" in item_text_lower)
                 
                 result_text = ""
                 if result_col_idx != -1 and result_col_idx < len(row):
                     result_text = clean_text(row[result_col_idx])
                 
+                # Plan A: 總和行跨行偷看
                 if is_pb_sum and not result_text:
-                    # 嘗試看下一行
                     if r_idx + 1 < len(table):
                         next_row = table[r_idx + 1]
                         if result_col_idx != -1 and result_col_idx < len(next_row):
@@ -850,7 +852,6 @@ def process_intertek_engine(pdf, filename):
                             if "nd" in next_val.lower():
                                 result_text = "N.D."
                     
-                    # 嘗試強制由右掃描
                     if not result_text:
                          for cell in reversed(row):
                             c_lower = clean_text(cell).lower()
@@ -859,24 +860,29 @@ def process_intertek_engine(pdf, filename):
                                 break
                 
                 if not result_text and not is_pb_sum: 
-                    # 檢查是否為 PBDE 子項目，用於 Plan B 救援
-                    if "brominated" in item_text_lower and "ether" in item_text_lower:
-                         # 這裡需要找到結果
+                    # 檢查子項目 (Plan B)
+                    # PBDE 子項
+                    if ("brominated" in item_text_lower and "ether" in item_text_lower) or "monobde" in item_text_lower or "decabde" in item_text_lower or "모노브로모디페닐에테르" in item_text_raw:
                          sub_res = ""
                          if result_col_idx != -1 and result_col_idx < len(row):
                              sub_res = clean_text(row[result_col_idx])
                          if "nd" in sub_res.lower():
                              has_pbde_sub_nd = True
+                    # [v63.43 Fix] PBB 子項
+                    elif ("brominated" in item_text_lower and "biphenyl" in item_text_lower) or "monobb" in item_text_lower or "decabb" in item_text_lower or "모노브로모비페닐" in item_text_raw:
+                         sub_res = ""
+                         if result_col_idx != -1 and result_col_idx < len(row):
+                             sub_res = clean_text(row[result_col_idx])
+                         if "nd" in sub_res.lower():
+                             has_pbb_sub_nd = True
                     continue
 
-                # [v63.42 Fix] 數據清洗
                 result_text = clean_intertek_value(result_text)
                 
                 prio = parse_value_priority(result_text)
                 if prio[0] == 0: continue
 
                 for key, kws in SIMPLE_KEYWORDS.items():
-                    # [v63.42 Fix] CL 排除 PVC
                     if key == "CL" and ("pvc" in item_text_lower or "polyvinyl" in item_text_lower):
                         continue
 
@@ -889,9 +895,11 @@ def process_intertek_engine(pdf, filename):
                         data_pool[key].append({"priority": prio, "filename": filename})
                         break
     
-    # [v63.42 Fix] PBDE 救援 Plan B: 子項目反推
+    # [v63.42/43 Fix] 子項目反推總和
     if not data_pool["PBDE"] and has_pbde_sub_nd:
         data_pool["PBDE"].append({"priority": (1, 0, "N.D."), "filename": filename})
+    if not data_pool["PBB"] and has_pbb_sub_nd:
+        data_pool["PBB"].append({"priority": (1, 0, "N.D."), "filename": filename})
                         
     return data_pool, date_candidates
 
@@ -917,7 +925,7 @@ def process_files(files):
                     # 通道 B: CTI
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
                 elif company == "INTERTEK":
-                    # 通道 D: INTERTEK (v63.42 深度優化版)
+                    # 通道 D: INTERTEK (v63.43 韓文版支援)
                     data_pool, date_candidates = process_intertek_engine(pdf, file.name)
                 else:
                     # 通道 C: 標準 SGS
@@ -961,9 +969,9 @@ def find_report_start_page(pdf):
 # 9. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v63.42", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.42 Intertek 深度優化版)")
-st.info("💡 v63.42 更新：\n1. Intertek PBDE 救援：若總和行抓不到，自動透過子項目(Mono...Deca)反推 N.D.。\n2. 數據清洗：自動去除 `(#2)` 等括號雜訊。\n3. 修復 CL 誤判 PVC Negative 與日期抓錯問題。")
+st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v63.43", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.43 韓文版 Intertek 兼容版)")
+st.info("💡 v63.43 更新：\n1. Intertek：新增韓文關鍵字支援 (如 폴리브롬화비페닐) 與子項目反推 PBB 總和邏輯，完美支援韓文版報告。\n2. SGS/CTI：保持 v63.39 穩定狀態，SGS 簡體版 PBB/PBDE 與 CTI 日期抓取均正常運作。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -985,7 +993,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Intertek_Summary_v63.42.xlsx",
+            file_name="SGS_CTI_Intertek_Summary_v63.43.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
