@@ -824,4 +824,23 @@ if uploaded_files:
     if st.button("🔄 重新執行"): st.rerun()
 
     try:
-        result_data = process_files(uploaded_
+        result_data = process_files(uploaded_files)
+        df = pd.DataFrame(result_data)
+        df = df.reindex(columns=OUTPUT_COLUMNS)
+
+        st.success("✅ 處理完成！")
+        st.dataframe(df)
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Summary')
+        
+        st.download_button(
+            label="📥 下載 Excel",
+            data=output.getvalue(),
+            file_name="SGS_CTI_Summary_v63.38.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+    except Exception as e:
+        st.error(f"系統錯誤: {e}")
