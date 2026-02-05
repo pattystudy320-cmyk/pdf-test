@@ -163,7 +163,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 4. [Core 2] SGS 馬來西亞專用引擎 (v63.28 邏輯 - 保持不動)
+# 4. [Core 2] SGS 馬來西亞專用引擎 (v63.28 邏輯)
 # =============================================================================
 
 def extract_date_malaysia_v7(text):
@@ -254,7 +254,7 @@ def process_malaysia_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 5. [Core 1] CTI 專用引擎 (v63.36 修正: 日期權重 + BR豁免 + MaxRule)
+# 5. [Core 1] CTI 專用引擎 (v63.36 修正)
 # =============================================================================
 
 def extract_dates_v63_13_global(text):
@@ -398,7 +398,7 @@ def process_cti_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 6. [Core 1] SGS 標準引擎 (v63.37 修正: 總和行強制掃描 + 0.003排除)
+# 6. [Core 1] SGS 標準引擎 (v63.38 修正: 總和行免死金牌)
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -663,13 +663,12 @@ def process_standard_engine(pdf, filename, company):
                                 result = cell
                                 break
 
-                    # [v63.37 Fix] 總和行強制無條件掃描 (Ignore identified columns)
+                    # [v63.37] 總和行強制無條件掃描
                     is_sum_row = "sum of" in item_name_lower or "之和" in item_name_lower
                     if is_sum_row:
-                         result = "" # Reset result to force scan
+                         result = "" 
                          for cell in reversed(clean_row):
                             c_lower = cell.lower()
-                            # Skip limit-like values
                             if c_lower in ["1000", "100", "50", "10", "mg/kg", "ppm", "-"]: continue
                             if "nd" in c_lower or "n.d." in c_lower:
                                 result = cell
@@ -679,11 +678,13 @@ def process_standard_engine(pdf, filename, company):
                                 result = cell
                                 break
 
-                    # [v63.34] MDL 數值排除法
-                    if mdl_idx != -1 and mdl_idx < len(clean_row):
-                        mdl_val = clean_text(clean_row[mdl_idx])
-                        if result == mdl_val and result != "":
-                            result = "" 
+                    # [v63.38 Fix] 只有「非總和行」才執行 MDL 數值排除
+                    # 如果是總和行，直接信任上面的強制掃描結果
+                    if not is_sum_row:
+                        if mdl_idx != -1 and mdl_idx < len(clean_row):
+                            mdl_val = clean_text(clean_row[mdl_idx])
+                            if result == mdl_val and result != "":
+                                result = "" 
 
                     temp_priority = parse_value_priority(result)
                     if temp_priority[0] == 0:
@@ -704,12 +705,12 @@ def process_standard_engine(pdf, filename, company):
                     for target_key, keywords in SIMPLE_KEYWORDS.items():
                         if target_key == "Cd" and any(bad in item_name_lower for bad in ["hbcdd", "cyclododecane", "ecd", "indeno"]): continue
                         if target_key == "F" and any(bad in item_name_lower for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
-                        # [v63.36 Fix] BR 豁免
                         if target_key == "BR" and ("halogen" in item_name_lower or "bromine" in item_name_lower):
                             pass
                         else:
                             if target_key == "BR" and any(bad in item_name_lower for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
                         if target_key == "Pb" and any(bad in item_name_lower for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
+                        if target_key == "BBP" and ("tbbp" in item_name_lower or "tetrabromo" in item_name_lower): continue
 
                         for kw in keywords:
                             if kw.lower() in item_name_lower:
@@ -772,7 +773,7 @@ def process_files(files):
                     # 通道 B: CTI (v63.36 - Max Rule + 日期權重)
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
                 else:
-                    # 通道 C: 標準 SGS (v63.37 - 總和行強制掃描)
+                    # 通道 C: 標準 SGS (v63.38 - 總和行免死金牌)
                     data_pool, date_candidates = process_standard_engine(pdf, file.name, company)
                 
                 final_row = {}
@@ -813,9 +814,9 @@ def find_report_start_page(pdf):
 # 8. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.37", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.37 總和行無條件掃描版)")
-st.info("💡 v63.37：\n1. SGS 標準引擎：針對「Sum of PBB/PBDE」行實施無條件強制掃描，解決簡體版因 MDL 空白導致誤抓 Limit 數值的問題。\n2. CTI 引擎與馬來西亞引擎保持穩定。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.38", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.38 總和行免死金牌版)")
+st.info("💡 v63.38：\n1. 針對 SGS 簡體版 PBB/PBDE 總和行，完全豁免 MDL 數值排除檢查，防止抓到的 ND 被誤殺。\n2. 保留所有 CTI 與 SGS 日期、數值格式修正。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -823,23 +824,4 @@ if uploaded_files:
     if st.button("🔄 重新執行"): st.rerun()
 
     try:
-        result_data = process_files(uploaded_files)
-        df = pd.DataFrame(result_data)
-        df = df.reindex(columns=OUTPUT_COLUMNS)
-
-        st.success("✅ 處理完成！")
-        st.dataframe(df)
-
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Summary')
-        
-        st.download_button(
-            label="📥 下載 Excel",
-            data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.37.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        
-    except Exception as e:
-        st.error(f"系統錯誤: {e}")
+        result_data = process_files(uploaded_
