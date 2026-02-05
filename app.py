@@ -47,7 +47,7 @@ GROUP_KEYWORDS = {
     ],
     "PBDE": [
         "Polybrominated Diphenyl Ethers", "PBDEs", "Sum of PBDEs", 
-        "多溴聯苯醚總和", "多溴二苯醚之和", "多溴二苯醚总和", "多溴二苯醚",
+        "多溴聯苯醚總和", "多溴二苯醚之和", "多溴二苯醚總和", "多溴二苯醚",
         "Polybromodiphenyl ether", "Monobromodiphenyl ether", "Dibromodiphenyl ether", "Tribromodiphenyl ether",
         "Tetrabromodiphenyl ether", "Pentabromodiphenyl ether", "Hexabromodiphenyl ether",
         "Heptabromodiphenyl ether", "Octabromodiphenyl ether", "Nonabromodiphenyl ether",
@@ -741,20 +741,19 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 7. [Core 3] Intertek 專用引擎 (v63.41 修正)
+# 7. [Core 3] Intertek 專用引擎 (v63.42 修正: PBDE救援/清洗/日期)
 # =============================================================================
 
 def clean_intertek_value(val):
     if not val: return ""
-    # 移除括號及內容，如 "1381 (#2)" -> "1381"
-    cleaned = re.sub(r'\s*\([^)]*\)', '', val)
+    # v63.42 Fix: 移除括號及內容 (如 #2), 只保留數字
+    cleaned = re.sub(r'\s*\(.*?\)', '', val)
     return cleaned.strip()
 
 def extract_intertek_dates(text):
     candidates = []
     poison_kw = ["received", "receive", "expiry", "valid", "process", "testing period", "检测日期", "接收日期", "date test started", "date job applied"]
-    # [v63.41 Fix] 大幅提高 Issue Date 權重
-    bonus_kw = ["issue date"]
+    bonus_kw = ["issue date"] # v63.42: 高權重
     
     clean_text_str = re.sub(r'[^a-z0-9]', ' ', text.lower())
     tokens = clean_text_str.split()
@@ -792,8 +791,10 @@ def process_intertek_engine(pdf, filename):
     if "per- and polyfluoroalkyl substances" in full_text_content.lower() or "pfas" in full_text_content.lower():
         data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
     
-    # 2. 日期抓取 (v63.41 使用專用函式)
+    # 2. 日期抓取
     date_candidates = extract_intertek_dates(full_text_content[:2000])
+
+    has_pbde_sub_nd = False # PBDE 子項目救援旗標
 
     # 3. 表格掃描
     for page in pdf.pages:
@@ -811,7 +812,6 @@ def process_intertek_engine(pdf, filename):
                     rl_col_idx = c
                     break
             
-            # 定位 Item
             for c in range(cols):
                 header = str(table[0][c]).lower()
                 if "test item" in header or "測試項目" in header:
@@ -819,7 +819,6 @@ def process_intertek_engine(pdf, filename):
                     break
             if item_col_idx == -1: item_col_idx = 0
             
-            # 定位 Result
             result_col_idx = -1
             for c in range(cols):
                 header = str(table[0][c]).lower()
@@ -830,36 +829,54 @@ def process_intertek_engine(pdf, filename):
             if result_col_idx == -1 and rl_col_idx != -1:
                 result_col_idx = rl_col_idx - 1 
 
-            for row in table:
-                # [v63.41 Fix] PBDE 強制掃描邏輯
+            for r_idx, row in enumerate(table):
+                if len(row) <= item_col_idx: continue
                 item_text_raw = clean_text(row[item_col_idx])
                 item_text_lower = item_text_raw.lower()
                 
-                # 若是 PBDE/PBB 總和行，即使找不到 RL/Result 也要嘗試掃描
+                # [v63.42 Fix] PBDE 救援 Plan A: 跨行偷看
                 is_pb_sum = "polybrominated" in item_text_lower and ("biphenyls" in item_text_lower or "ether" in item_text_lower)
                 
                 result_text = ""
                 if result_col_idx != -1 and result_col_idx < len(row):
                     result_text = clean_text(row[result_col_idx])
                 
-                # 如果是 PBDE 且結果為空，嘗試強制由右掃描
                 if is_pb_sum and not result_text:
-                     for cell in reversed(row):
-                        c_lower = clean_text(cell).lower()
-                        if "nd" in c_lower or "n.d." in c_lower:
-                            result_text = "N.D."
-                            break
+                    # 嘗試看下一行
+                    if r_idx + 1 < len(table):
+                        next_row = table[r_idx + 1]
+                        if result_col_idx != -1 and result_col_idx < len(next_row):
+                            next_val = clean_text(next_row[result_col_idx])
+                            if "nd" in next_val.lower():
+                                result_text = "N.D."
+                    
+                    # 嘗試強制由右掃描
+                    if not result_text:
+                         for cell in reversed(row):
+                            c_lower = clean_text(cell).lower()
+                            if "nd" in c_lower or "n.d." in c_lower:
+                                result_text = "N.D."
+                                break
                 
-                if not result_text and not is_pb_sum: continue
+                if not result_text and not is_pb_sum: 
+                    # 檢查是否為 PBDE 子項目，用於 Plan B 救援
+                    if "brominated" in item_text_lower and "ether" in item_text_lower:
+                         # 這裡需要找到結果
+                         sub_res = ""
+                         if result_col_idx != -1 and result_col_idx < len(row):
+                             sub_res = clean_text(row[result_col_idx])
+                         if "nd" in sub_res.lower():
+                             has_pbde_sub_nd = True
+                    continue
 
-                # [v63.41 Fix] 數據清洗
+                # [v63.42 Fix] 數據清洗
                 result_text = clean_intertek_value(result_text)
                 
                 prio = parse_value_priority(result_text)
                 if prio[0] == 0: continue
 
                 for key, kws in SIMPLE_KEYWORDS.items():
-                    # [v63.41 Fix] CL 排除 PVC/Polyvinyl
+                    # [v63.42 Fix] CL 排除 PVC
                     if key == "CL" and ("pvc" in item_text_lower or "polyvinyl" in item_text_lower):
                         continue
 
@@ -871,6 +888,10 @@ def process_intertek_engine(pdf, filename):
                     if any(kw.lower() in item_text_lower for kw in kws):
                         data_pool[key].append({"priority": prio, "filename": filename})
                         break
+    
+    # [v63.42 Fix] PBDE 救援 Plan B: 子項目反推
+    if not data_pool["PBDE"] and has_pbde_sub_nd:
+        data_pool["PBDE"].append({"priority": (1, 0, "N.D."), "filename": filename})
                         
     return data_pool, date_candidates
 
@@ -896,7 +917,7 @@ def process_files(files):
                     # 通道 B: CTI
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
                 elif company == "INTERTEK":
-                    # 通道 D: INTERTEK (v63.41 強化版)
+                    # 通道 D: INTERTEK (v63.42 深度優化版)
                     data_pool, date_candidates = process_intertek_engine(pdf, file.name)
                 else:
                     # 通道 C: 標準 SGS
@@ -940,9 +961,9 @@ def find_report_start_page(pdf):
 # 9. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v63.41", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.41 Intertek 完美優化版)")
-st.info("💡 v63.41 更新：\n1. Intertek：修復日期抓取、去除數值括號註記(如 #2)、解決 CL 誤抓 PVC Negative 問題、強制抓取 PBDE 總和。\n2. SGS/CTI：保持 v63.39 穩定狀態。")
+st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v63.42", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.42 Intertek 深度優化版)")
+st.info("💡 v63.42 更新：\n1. Intertek PBDE 救援：若總和行抓不到，自動透過子項目(Mono...Deca)反推 N.D.。\n2. 數據清洗：自動去除 `(#2)` 等括號雜訊。\n3. 修復 CL 誤判 PVC Negative 與日期抓錯問題。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -964,7 +985,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Intertek_Summary_v63.41.xlsx",
+            file_name="SGS_CTI_Intertek_Summary_v63.42.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
