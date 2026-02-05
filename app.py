@@ -163,7 +163,7 @@ def identify_company(text):
     return "OTHERS"
 
 # =============================================================================
-# 4. [Core 2] SGS 馬來西亞專用引擎 (v63.28 邏輯)
+# 4. [Core 2] SGS 馬來西亞專用引擎 (v63.28 邏輯 - 保持不動)
 # =============================================================================
 
 def extract_date_malaysia_v7(text):
@@ -254,7 +254,7 @@ def process_malaysia_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 5. [Core 1] CTI 專用引擎 (v63.36 修正: 日期權重 + BR 豁免 + Max Rule)
+# 5. [Core 1] CTI 專用引擎 (v63.36 修正: 日期權重 + BR豁免 + MaxRule)
 # =============================================================================
 
 def extract_dates_v63_13_global(text):
@@ -377,13 +377,12 @@ def process_cti_engine(pdf, filename):
                 if final_prio[0] == 0: continue
 
                 for key, kws in SIMPLE_KEYWORDS.items():
-                    # [v63.36 Fix] BR 豁免條款：如果是 Halogen/Bromine，允許存在 "poly"
+                    # [v63.36 Fix] BR 豁免條款
                     if key == "BR" and ("halogen" in item_text or "bromine" in item_text):
-                        pass # Skip standard filters for BR
+                        pass 
                     else:
                         if key == "Cd" and any(bad in item_text for bad in ["hbcdd", "cyclododecane", "ecd"]): continue 
                         if key == "F" and any(bad in item_text for bad in ["perfluoro", "polyfluoro", "pfos", "pfoa", "全氟"]): continue
-                        # [Standard BR filter]
                         if key == "BR" and any(bad in item_text for bad in ["polybromo", "hexabromo", "monobromo", "dibromo", "tribromo", "tetrabromo", "pentabromo", "heptabromo", "octabromo", "nonabromo", "decabromo", "multibromo", "pbb", "pbde", "多溴", "六溴", "一溴", "二溴", "三溴", "四溴", "五溴", "七溴", "八溴", "九溴", "十溴", "二苯醚"]): continue
                         if key == "Pb" and any(bad in item_text for bad in ["pbb", "pbde", "polybrominated", "多溴"]): continue
 
@@ -399,14 +398,13 @@ def process_cti_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 6. [Core 1] SGS 標準引擎 (v63.36 修正: 總和行特赦 + 日期權重)
+# 6. [Core 1] SGS 標準引擎 (v63.37 修正: 總和行強制掃描 + 0.003排除)
 # =============================================================================
 
 def extract_dates_v60(text):
     lines = text.split('\n')
     candidates = []
     bonus_kw = ["report date", "issue date", "date:", "dated", "日期"]
-    # [v63.36 Fix] 日期毒藥
     poison_kw = ["approve", "approved", "receive", "received", "receipt", "period", "expiry", "valid", "testing period", "检测日期"]
     pat_chinese = r"(20\d{2})\s*年\s*(0?[1-9]|1[0-2])\s*月\s*(3[01]|[12][0-9]|0?[1-9])\s*日"
     pat_ymd = r"(20\d{2})[\.\/-](0?[1-9]|1[0-2])[\.\/-](3[01]|[12][0-9]|0?[1-9])"
@@ -665,12 +663,19 @@ def process_standard_engine(pdf, filename, company):
                                 result = cell
                                 break
 
-                    # [v63.36 Fix] 總和行特赦 (即使 MDL 為空也允許抓取)
+                    # [v63.37 Fix] 總和行強制無條件掃描 (Ignore identified columns)
                     is_sum_row = "sum of" in item_name_lower or "之和" in item_name_lower
-                    if is_sum_row and result == "":
+                    if is_sum_row:
+                         result = "" # Reset result to force scan
                          for cell in reversed(clean_row):
                             c_lower = cell.lower()
+                            # Skip limit-like values
+                            if c_lower in ["1000", "100", "50", "10", "mg/kg", "ppm", "-"]: continue
                             if "nd" in c_lower or "n.d." in c_lower:
+                                result = cell
+                                break
+                            if re.search(r"^\d+(\.\d+)?", cell):
+                                if is_suspicious_limit_value(cell): continue
                                 result = cell
                                 break
 
@@ -764,10 +769,10 @@ def process_files(files):
                     # 通道 A: 馬來西亞 (v63.28 核心 - 文字掃描)
                     data_pool, date_candidates = process_malaysia_engine(pdf, file.name)
                 elif company == "CTI":
-                    # 通道 B: CTI (v63.36 - 日期權重 + BR豁免)
+                    # 通道 B: CTI (v63.36 - Max Rule + 日期權重)
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
                 else:
-                    # 通道 C: 標準 SGS (v63.36 - 總和行特赦)
+                    # 通道 C: 標準 SGS (v63.37 - 總和行強制掃描)
                     data_pool, date_candidates = process_standard_engine(pdf, file.name, company)
                 
                 final_row = {}
@@ -808,9 +813,9 @@ def find_report_start_page(pdf):
 # 8. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.36", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.36 微創修正版)")
-st.info("💡 v63.36：\n1. CTI 日期抓取修正（權重邏輯，排除 Testing Period）。\n2. CTI 溴 (BR) 誤殺修正（放寬過濾）。\n3. SGS 簡體版 PBB 總和修正（允許空 MDL）。\n4. 核心架構維持不變。")
+st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.37", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.37 總和行無條件掃描版)")
+st.info("💡 v63.37：\n1. SGS 標準引擎：針對「Sum of PBB/PBDE」行實施無條件強制掃描，解決簡體版因 MDL 空白導致誤抓 Limit 數值的問題。\n2. CTI 引擎與馬來西亞引擎保持穩定。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -832,7 +837,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.36.xlsx",
+            file_name="SGS_CTI_Summary_v63.37.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
