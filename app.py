@@ -16,7 +16,7 @@ OUTPUT_COLUMNS = [
     "日期", "檔案名稱"
 ]
 
-# v63.39: 補齊簡體中文關鍵字 (如：联/聯, 价/價)
+# v63.39: 補齊簡體中文關鍵字
 SIMPLE_KEYWORDS = {
     "Pb": ["Lead", "鉛", "铅", "Pb"],
     "Cd": ["Cadmium", "鎘", "镉", "Cd"],
@@ -33,7 +33,7 @@ SIMPLE_KEYWORDS = {
     "I": ["Iodine", "碘", "lodine"]
 }
 
-# v63.39: PBB/PBDE 補齊簡體中文 (联/醚)
+# v63.39: PBB/PBDE 補齊簡體中文
 GROUP_KEYWORDS = {
     "PBB": [
         "Polybrominated Biphenyls", "PBBs", "Sum of PBBs", 
@@ -112,7 +112,6 @@ def is_valid_date(dt):
 def is_suspicious_limit_value(val):
     try:
         n = float(val)
-        # v63.35 Fix: SGS 0.003 MDL 排除
         if n in [1000.0, 100.0, 50.0, 25.0, 10.0, 5.0, 2.0, 0.003, 0.005, 0.01, 0.05, 0.050, 0.0005]: return True
         return False
     except: return False
@@ -147,7 +146,6 @@ def parse_value_priority(value_str):
     return (0, 0, val)
 
 def format_output_value(val):
-    """v63.35: 格式化輸出，去除 .0"""
     try:
         f = float(val)
         if f.is_integer():
@@ -256,16 +254,14 @@ def process_malaysia_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 5. [Core 1] CTI 專用引擎 (v63.36 修正: 日期權重 + BR豁免 + MaxRule)
+# 5. [Core 1] CTI 專用引擎 (v63.36 修正)
 # =============================================================================
 
 def extract_dates_v63_13_global(text):
     candidates = []
-    # [v63.36 Fix] 日期權重毒藥
     poison_kw = ["received", "receive", "expiry", "valid", "process", "testing period", "检测日期", "接收日期"]
     backup_kw = ["testing", "period", "test"]
-    # [v63.36 Fix] 日期權重加分
-    bonus_kw = ["report date", "date:", "日期:", "report no"]
+    bonus_kw = ["report date", "date:", "日期:", "report no", "issue date"]
     
     clean_text_str = re.sub(r'[^a-z0-9]', ' ', text.lower())
     tokens = clean_text_str.split()
@@ -286,7 +282,6 @@ def extract_dates_v63_13_global(text):
                 start_lookback = max(0, i - 10)
                 context_window = tokens[start_lookback : i]
                 score = 100 
-                # [v63.36 Fix] 應用權重
                 if any(p in context_window for p in poison_kw): score -= 1000 
                 elif any(b in context_window for b in bonus_kw): score += 500
                 elif any(b in context_window for b in backup_kw): score += 10 
@@ -349,7 +344,6 @@ def process_cti_engine(pdf, filename):
                 if len(row) <= mdl_col_idx: continue
                 item_text = clean_text(row[item_col_idx]).lower()
                 
-                # [v63.35 Fix] TBBP-A 防呆
                 if "tbbp" in item_text or "tetrabromo" in item_text: continue
 
                 valid_numbers = []
@@ -369,7 +363,7 @@ def process_cti_engine(pdf, filename):
                 
                 final_prio = (0, 0, "")
                 if valid_numbers:
-                    max_val = max(valid_numbers) # Max Rule
+                    max_val = max(valid_numbers) 
                     final_prio = (3, max_val, str(max_val))
                 elif has_negative:
                     final_prio = (2, 0, "NEGATIVE")
@@ -379,7 +373,6 @@ def process_cti_engine(pdf, filename):
                 if final_prio[0] == 0: continue
 
                 for key, kws in SIMPLE_KEYWORDS.items():
-                    # [v63.36 Fix] BR 豁免條款
                     if key == "BR" and ("halogen" in item_text or "bromine" in item_text):
                         pass 
                     else:
@@ -400,7 +393,7 @@ def process_cti_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 6. [Core 1] SGS 標準引擎 (v63.38 修正: 總和行免死金牌)
+# 6. [Core 1] SGS 標準引擎 (v63.38 修正)
 # =============================================================================
 
 def extract_dates_v60(text):
@@ -493,10 +486,7 @@ def parse_text_lines_v60(text, data_pool, file_group_data, filename, company, ta
         matched_simple = None
         for key, keywords in SIMPLE_KEYWORDS.items():
             if targets and key not in targets: continue
-            # [v63.35 Fix] TBBP 防呆
             if key == "BBP" and ("tbbp" in line_lower or "tetrabromo" in line_lower): continue
-
-            # [v63.36 Fix] BR 豁免
             if key == "BR" and ("halogen" in line_lower or "bromine" in line_lower):
                 pass
             else:
@@ -665,7 +655,6 @@ def process_standard_engine(pdf, filename, company):
                                 result = cell
                                 break
 
-                    # [v63.37] 總和行強制無條件掃描
                     is_sum_row = "sum of" in item_name_lower or "之和" in item_name_lower or "总和" in item_name_lower
                     if is_sum_row:
                          result = "" 
@@ -680,8 +669,6 @@ def process_standard_engine(pdf, filename, company):
                                 result = cell
                                 break
 
-                    # [v63.38 Fix] 只有「非總和行」才執行 MDL 數值排除
-                    # 如果是總和行，直接信任上面的強制掃描結果
                     if not is_sum_row:
                         if mdl_idx != -1 and mdl_idx < len(clean_row):
                             mdl_val = clean_text(clean_row[mdl_idx])
@@ -754,7 +741,85 @@ def process_standard_engine(pdf, filename, company):
     return data_pool, file_dates_candidates
 
 # =============================================================================
-# 7. 主程式與分流器
+# 7. [Core 3] Intertek 專用引擎 (v63.40 新增)
+# =============================================================================
+
+def process_intertek_engine(pdf, filename):
+    data_pool = {key: [] for key in OUTPUT_COLUMNS if key not in ["日期", "檔案名稱"]}
+    
+    full_text_content = ""
+    for p in pdf.pages:
+        full_text_content += (p.extract_text() or "") + "\n"
+    
+    # 1. 全域掃描 PFAS
+    if "per- and polyfluoroalkyl substances" in full_text_content.lower() or "pfas" in full_text_content.lower():
+        data_pool["PFAS"].append({"priority": (4, 0, "REPORT"), "filename": filename})
+    
+    # 2. 日期抓取
+    date_candidates = extract_dates_v63_13_global(full_text_content[:2000]) # 掃描前幾頁
+
+    # 3. 表格掃描 (針對重金屬、鹵素等)
+    for page in pdf.pages:
+        tables = page.extract_tables()
+        for table in tables:
+            if not table or len(table) < 2: continue
+            
+            # 定位 RL/MDL 欄位
+            rl_col_idx = -1
+            item_col_idx = -1
+            cols = len(table[0])
+            
+            for c in range(cols):
+                header = clean_text(table[0][c]).lower()
+                if "rl" in header or "reporting limit" in header or "mdl" in header or "loq" in header:
+                    rl_col_idx = c
+                    break
+            
+            if rl_col_idx == -1: continue # Intertek 表格通常都有 RL
+
+            # 定位 Item 欄位
+            for c in range(cols):
+                header = str(table[0][c]).lower()
+                if "test item" in header or "測試項目" in header:
+                    item_col_idx = c
+                    break
+            if item_col_idx == -1: item_col_idx = 0
+            
+            # 定位 Result 欄位 (通常在 RL 左邊，或標頭有 Result)
+            result_col_idx = -1
+            for c in range(cols):
+                header = str(table[0][c]).lower()
+                if "result" in header or "結果" in header or "submitted samples" in header:
+                    result_col_idx = c
+                    break
+            
+            if result_col_idx == -1 and rl_col_idx > 0:
+                result_col_idx = rl_col_idx - 1 # 默認在 RL 左邊
+
+            # 逐行掃描
+            for row in table:
+                if len(row) <= rl_col_idx or len(row) <= result_col_idx: continue
+                item_text = clean_text(row[item_col_idx]).lower()
+                result_text = clean_text(row[result_col_idx])
+                
+                prio = parse_value_priority(result_text)
+                if prio[0] == 0: continue
+
+                for key, kws in SIMPLE_KEYWORDS.items():
+                    if any(kw.lower() in item_text for kw in kws):
+                         # Intertek 特例: 排除 "Content" 導致的誤判? 不，Intertek 本來就常寫 Content，直接抓
+                        data_pool[key].append({"priority": prio, "filename": filename})
+                        break
+                
+                for key, kws in GROUP_KEYWORDS.items():
+                    if any(kw.lower() in item_text for kw in kws):
+                        data_pool[key].append({"priority": prio, "filename": filename})
+                        break
+                        
+    return data_pool, date_candidates
+
+# =============================================================================
+# 8. 主程式與分流器
 # =============================================================================
 
 def process_files(files):
@@ -769,13 +834,16 @@ def process_files(files):
                 
                 # 分流邏輯
                 if "MALAYSIA" in first_page_text and "SGS" in first_page_text:
-                    # 通道 A: 馬來西亞 (v63.28 核心 - 文字掃描)
+                    # 通道 A: 馬來西亞
                     data_pool, date_candidates = process_malaysia_engine(pdf, file.name)
                 elif company == "CTI":
-                    # 通道 B: CTI (v63.36 - Max Rule + 日期權重)
+                    # 通道 B: CTI
                     data_pool, date_candidates = process_cti_engine(pdf, file.name)
+                elif company == "INTERTEK":
+                    # 通道 D: INTERTEK (New v63.40)
+                    data_pool, date_candidates = process_intertek_engine(pdf, file.name)
                 else:
-                    # 通道 C: 標準 SGS (v63.38 - 總和行免死金牌)
+                    # 通道 C: 標準 SGS
                     data_pool, date_candidates = process_standard_engine(pdf, file.name, company)
                 
                 final_row = {}
@@ -813,12 +881,12 @@ def find_report_start_page(pdf):
     return 0
 
 # =============================================================================
-# 8. UI
+# 9. UI
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI 報告聚合工具 v63.39", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.39 繁簡通吃終極修正版)")
-st.info("💡 v63.39：補齊 PBB/PBDE 等關鍵字庫的簡體中文支援 (如「联苯」)，解決 SGS 簡體報告抓取問題。同時保留所有日期權重、數值修正與總和行保護邏輯。")
+st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v63.40", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.40 三核心 Intertek 增強版)")
+st.info("💡 v63.40：\n1. 新增 Intertek 專用處理引擎，解決 Pb/Cd 等重金屬因表格 RL 標頭導致的漏抓。\n2. Intertek 報告支援全域掃描 PFAS 關鍵字。\n3. SGS 與 CTI 邏輯完全保持 v63.39 狀態。")
 
 uploaded_files = st.file_uploader("請一次選取所有 PDF 檔案", type="pdf", accept_multiple_files=True)
 
@@ -840,7 +908,7 @@ if uploaded_files:
         st.download_button(
             label="📥 下載 Excel",
             data=output.getvalue(),
-            file_name="SGS_CTI_Summary_v63.39.xlsx",
+            file_name="SGS_CTI_Intertek_Summary_v63.40.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
