@@ -980,9 +980,9 @@ def process_batch(files, item_index):
 # 10. UI (Streamlit)
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v63.46", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.46 防呆過濾版)")
-st.info("💡 v63.46 更新：\n1. 新增「純圖片/掃描檔」防呆過濾：若上傳了無法讀取文字的檔案，將自動忽略並在下方列出警示。\n2. 保留所有 v63.45 的智慧整合與解析邏輯。")
+st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v63.48", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.48 雙模式清除版)")
+st.info("💡 v63.48 更新：\n1. 新增「❌ 清除上傳檔案」按鈕：僅清空檔案，保留表格，方便連續作業。\n2. 強化「🗑️ 清除所有資料」按鈕：真正的一鍵全還原（清空檔案 + 清空表格）。")
 
 # 初始化 Session State
 if 'results' not in st.session_state:
@@ -990,15 +990,25 @@ if 'results' not in st.session_state:
 if 'item_count' not in st.session_state:
     st.session_state['item_count'] = 0
 if 'unreadable_logs' not in st.session_state:
-    st.session_state['unreadable_logs'] = [] # 儲存警示訊息
+    st.session_state['unreadable_logs'] = []
+if 'uploader_key' not in st.session_state: # [v63.48 Fix] 動態元件 ID
+    st.session_state['uploader_key'] = 0
 
-# 上傳區
-uploaded_files = st.file_uploader("請拖入一批 PDF 檔案 (視為同一 ITEM)", type="pdf", accept_multiple_files=True)
+# 上傳區 (使用動態 Key)
+uploaded_files = st.file_uploader(
+    "請拖入一批 PDF 檔案 (視為同一 ITEM)", 
+    type="pdf", 
+    accept_multiple_files=True, 
+    key=f"uploader_{st.session_state['uploader_key']}" # [v63.48] 綁定動態 ID
+)
 
-col1, col2 = st.columns([1, 1])
+col1, col2, col3 = st.columns([1, 1, 1])
 
 with col1:
     if st.button("▶️ 執行解析 (新增 ITEM)", type="primary"):
+        # 強制清空舊警示
+        st.session_state['unreadable_logs'] = []
+        
         if uploaded_files:
             st.session_state['item_count'] += 1
             current_item_id = st.session_state['item_count']
@@ -1010,7 +1020,7 @@ with col1:
                 if row:
                     st.session_state['results'].append(row)
                     st.success(f"ITEM {current_item_id} 處理完成！")
-                elif not unreadable_files: # 如果沒有結果也不是因為掃描檔 (例如檔案毀損)
+                elif not unreadable_files:
                     st.warning(f"ITEM {current_item_id} 沒有讀取到有效數據。")
 
                 # 處理無效檔案記錄
@@ -1022,10 +1032,18 @@ with col1:
             st.warning("請先上傳檔案！")
 
 with col2:
-    if st.button("🗑️ 清除所有資料"):
+    if st.button("❌ 清除上傳檔案 (保留表格)"):
+        # [v63.48] 只更新上傳元件 ID，達到清空檔案效果，不碰 results
+        st.session_state['uploader_key'] += 1
+        st.rerun()
+
+with col3:
+    if st.button("🗑️ 清除所有資料 (全重置)"):
+        # [v63.48] 核彈級清空：資料 + 警示 + 計數 + 上傳元件
         st.session_state['results'] = []
         st.session_state['item_count'] = 0
         st.session_state['unreadable_logs'] = []
+        st.session_state['uploader_key'] += 1
         st.rerun()
 
 # 顯示結果
@@ -1042,13 +1060,14 @@ if st.session_state['results']:
     df = df[DISPLAY_COLUMNS] 
     st.dataframe(df)
 
-    # 警示區 (v63.46 新增)
-    if st.session_state['unreadable_logs']:
-        st.markdown("---")
-        st.error("⚠️ **以下檔案因格式為純圖片/掃描檔，無法讀取數據，未包含在上方結果中：**")
-        for log in st.session_state['unreadable_logs']:
-            st.write(f"- {log}")
+# 警示區
+if st.session_state['unreadable_logs']:
+    st.markdown("---")
+    st.error("⚠️ **以下檔案因格式為純圖片/掃描檔，無法讀取數據，未包含在上方結果中：**")
+    for log in st.session_state['unreadable_logs']:
+        st.write(f"- {log}")
 
+if st.session_state['results']:
     # 下載按鈕
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -1057,6 +1076,6 @@ if st.session_state['results']:
     st.download_button(
         label="📥 下載 Excel",
         data=output.getvalue(),
-        file_name=f"SGS_CTI_Intertek_Summary_v63.46.xlsx",
+        file_name=f"SGS_CTI_Intertek_Summary_v63.48.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
