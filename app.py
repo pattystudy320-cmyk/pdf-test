@@ -824,7 +824,7 @@ def process_intertek_engine(pdf, filename):
     return data_pool, date_candidates
 
 # =============================================================================
-# 9. 智慧整合邏輯 (v63.45 新增核心)
+# 9. 智慧整合邏輯 (v63.46 新增防呆機制)
 # =============================================================================
 
 def get_value_score(val_str):
@@ -871,13 +871,22 @@ def compare_chemical_values(v1, v2):
     return v1
 
 def process_batch(files, item_index):
-    """處理單一批次檔案，回傳整合後的單列資料"""
-    batch_raw_data = [] # 存儲每個檔案的原始抓取結果
+    """處理單一批次檔案，回傳 (整合後的單列資料, 無法讀取的檔名列表)"""
+    batch_raw_data = [] 
+    unreadable_list = [] # [v63.46 Fix] 儲存無法讀取的掃描檔
     
-    # 1. 分別解析每個檔案
     for file in files:
         try:
             with pdfplumber.open(file) as pdf:
+                # [v63.46 Fix] 防呆檢查：文字密度過低則視為掃描檔
+                all_text = ""
+                for p in pdf.pages[:2]: all_text += (p.extract_text() or "")
+                
+                if len(all_text.strip()) < 50:
+                    unreadable_list.append(file.name)
+                    continue # 跳過此檔案，不進行解析
+
+                # 正常解析流程
                 first_page_text = (pdf.pages[0].extract_text() or "").upper()
                 company = identify_company(first_page_text)
                 
@@ -920,7 +929,9 @@ def process_batch(files, item_index):
         except Exception as e:
             st.error(f"檔案 {file.name} 解析失敗: {e}")
 
-    if not batch_raw_data: return None
+    # 若全數為掃描檔或無有效檔案
+    if not batch_raw_data:
+        return None, unreadable_list
 
     # 2. 整合運算 (Aggregation)
     aggregated_row = {"ITEM": item_index}
@@ -934,11 +945,10 @@ def process_batch(files, item_index):
             current_val = d.get(k, "")
             best_val = compare_chemical_values(best_val, current_val)
         
-        # 映射到顯示欄位名稱 (如 PBB -> PBBs)
         display_key = COLUMN_MAPPING.get(k, k)
         aggregated_row[display_key] = best_val
 
-    # (B) 日期整合: 取最新日期 (獨立判斷)
+    # (B) 日期整合: 取最新日期
     latest_date_obj = datetime.min
     latest_date_str = ""
     for d in batch_raw_data:
@@ -947,10 +957,8 @@ def process_batch(files, item_index):
             latest_date_str = d["Date"]
     aggregated_row["Date"] = latest_date_str
 
-    # (C) 檔名整合: Pb 優先決 > 日期決
+    # (C) 檔名整合: Pb 優先決
     best_file_name = batch_raw_data[0]["File Name"]
-    
-    # 找 Pb 最高分
     max_pb_score = (-1, -1)
     for d in batch_raw_data:
         s = d.get("Pb_score", (0, 0))
@@ -959,31 +967,30 @@ def process_batch(files, item_index):
         elif s[0] == max_pb_score[0] and s[1] > max_pb_score[1]:
             max_pb_score = s
             
-    # 篩選出 Pb 最高的檔案們 (可能有多個)
     candidates = [d for d in batch_raw_data if d.get("Pb_score") == max_pb_score]
-    
-    # 從候選者中找日期最新的
     if candidates:
         best_candidate = sorted(candidates, key=lambda x: x["DateObj"], reverse=True)[0]
         best_file_name = best_candidate["File Name"]
         
     aggregated_row["File Name"] = best_file_name
 
-    return aggregated_row
+    return aggregated_row, unreadable_list
 
 # =============================================================================
 # 10. UI (Streamlit)
 # =============================================================================
 
-st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v63.45", layout="wide")
-st.title("📄 萬用型檢測報告聚合工具 (v63.45 智慧整合版)")
-st.info("💡 v63.45 更新：\n1. 支援「累加式上傳」：多次執行會自動新增 ITEM 列。\n2. 智慧整合：針對同一批檔案，自動抓取各元素的「最大風險值」。\n3. 邏輯優化：日期顯示「最新日期」，檔名顯示「Pb 最高者」。")
+st.set_page_config(page_title="SGS/CTI/Intertek 報告聚合工具 v63.46", layout="wide")
+st.title("📄 萬用型檢測報告聚合工具 (v63.46 防呆過濾版)")
+st.info("💡 v63.46 更新：\n1. 新增「純圖片/掃描檔」防呆過濾：若上傳了無法讀取文字的檔案，將自動忽略並在下方列出警示。\n2. 保留所有 v63.45 的智慧整合與解析邏輯。")
 
 # 初始化 Session State
 if 'results' not in st.session_state:
     st.session_state['results'] = []
 if 'item_count' not in st.session_state:
     st.session_state['item_count'] = 0
+if 'unreadable_logs' not in st.session_state:
+    st.session_state['unreadable_logs'] = [] # 儲存警示訊息
 
 # 上傳區
 uploaded_files = st.file_uploader("請拖入一批 PDF 檔案 (視為同一 ITEM)", type="pdf", accept_multiple_files=True)
@@ -997,10 +1004,20 @@ with col1:
             current_item_id = st.session_state['item_count']
             
             with st.spinner(f"正在處理 ITEM {current_item_id}..."):
-                row = process_batch(uploaded_files, current_item_id)
+                row, unreadable_files = process_batch(uploaded_files, current_item_id)
+                
+                # 處理有效結果
                 if row:
                     st.session_state['results'].append(row)
                     st.success(f"ITEM {current_item_id} 處理完成！")
+                elif not unreadable_files: # 如果沒有結果也不是因為掃描檔 (例如檔案毀損)
+                    st.warning(f"ITEM {current_item_id} 沒有讀取到有效數據。")
+
+                # 處理無效檔案記錄
+                if unreadable_files:
+                    msg = f"ITEM {current_item_id} 發現 {len(unreadable_files)} 份無法讀取(純圖片/掃描)的檔案，已自動排除：{', '.join(unreadable_files)}"
+                    st.session_state['unreadable_logs'].append(msg)
+                    
         else:
             st.warning("請先上傳檔案！")
 
@@ -1008,6 +1025,7 @@ with col2:
     if st.button("🗑️ 清除所有資料"):
         st.session_state['results'] = []
         st.session_state['item_count'] = 0
+        st.session_state['unreadable_logs'] = []
         st.rerun()
 
 # 顯示結果
@@ -1017,14 +1035,19 @@ if st.session_state['results']:
     # 建立 DataFrame 並依照指定順序排列
     df = pd.DataFrame(st.session_state['results'])
     
-    # 確保所有顯示欄位都存在
     for col in DISPLAY_COLUMNS:
         if col not in df.columns:
             df[col] = ""
             
-    df = df[DISPLAY_COLUMNS] # 重排序
-    
+    df = df[DISPLAY_COLUMNS] 
     st.dataframe(df)
+
+    # 警示區 (v63.46 新增)
+    if st.session_state['unreadable_logs']:
+        st.markdown("---")
+        st.error("⚠️ **以下檔案因格式為純圖片/掃描檔，無法讀取數據，未包含在上方結果中：**")
+        for log in st.session_state['unreadable_logs']:
+            st.write(f"- {log}")
 
     # 下載按鈕
     output = io.BytesIO()
@@ -1034,6 +1057,6 @@ if st.session_state['results']:
     st.download_button(
         label="📥 下載 Excel",
         data=output.getvalue(),
-        file_name=f"SGS_CTI_Intertek_Summary_v63.45.xlsx",
+        file_name=f"SGS_CTI_Intertek_Summary_v63.46.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
